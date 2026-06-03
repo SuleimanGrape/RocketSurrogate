@@ -1,0 +1,137 @@
+"""Main entry point: train a surrogate model on rocket simulation data.
+
+Usage:
+    python train_surrogate.py --data rocket_data.jsonl --model mlp --epochs 200
+    python train_surrogate.py --data rocket_data.jsonl --model resmlp --epochs 300 --lr 5e-4
+    python train_surrogate.py --data rocket_data.jsonl --model transformer --epochs 200
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+from models.surrogate import (
+    build_model,
+    CONTINUOUS_FEATURES,
+    CATEGORICAL_FEATURES,
+    CATEGORICAL_CARDINALITIES,
+    TARGETS,
+)
+from data.dataset import RocketDataset
+from training.trainer import Trainer
+from utils.helpers import set_seed
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Train a rocket surrogate model")
+    p.add_argument("--data", type=str, required=True, help="Path to JSONL of simulation results")
+    p.add_argument("--model", type=str, default="mlp", choices=["mlp", "resmlp", "transformer"])
+    p.add_argument("--epochs", type=int, default=200)
+    p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--weight-decay", type=float, default=1e-4)
+    p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--scheduler", type=str, default="cosine", choices=["cosine", "plateau", "none"])
+    p.add_argument("--patience", type=int, default=30)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--device", type=str, default="auto")
+    p.add_argument("--ckpt-dir", type=str, default="checkpoints")
+    p.add_argument("--hidden-dims", type=str, default="256,512,512,256,128",
+                   help="Comma-separated hidden layer sizes (MLP only)")
+    p.add_argument("--num-blocks", type=int, default=6,
+                   help="Number of residual blocks (ResMLP only)")
+    p.add_argument("--embedding-dim", type=int, default=8)
+    p.add_argument("--use-amp", action="store_true",
+                   help="Enable mixed precision (recommended for ROCm GPU training)")
+    p.add_argument("--num-workers", type=int, default=0,
+                   help="DataLoader workers (set > 0 when training on GPU)")
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    set_seed(args.seed)
+
+    # ── Load data ──────────────────────────────────────────────────────
+    print(f"Loading data from {args.data} ...")
+    dataset = RocketDataset.from_jsonl(args.data)
+    print(f"  {len(dataset)} samples loaded")
+    print(f"  Continuous features : {len(CONTINUOUS_FEATURES)}")
+    print(f"  Categorical features: {len(CATEGORICAL_FEATURES)}")
+    print(f"  Targets             : {len(TARGETS)}")
+
+    # ── Split + scale + DataLoaders ───────────────────────────────────
+    loaders = RocketDataset.make_loaders(
+        dataset,
+        batch_size=args.batch_size,
+        scale_inputs=True,
+        scale_targets=True,
+        seed=args.seed,
+        num_workers=args.num_workers,
+    )
+    print(f"  Train / Val / Test : {len(loaders['train'].dataset)} / "
+          f"{len(loaders['val'].dataset)} / {len(loaders['test'].dataset)}")
+
+    # ── Build model ───────────────────────────────────────────────────
+    hidden_dims = [int(x) for x in args.hidden_dims.split(",")]
+    model_kwargs = {
+        "continuous_dim": len(CONTINUOUS_FEATURES),
+        "categorical_cardinalities": CATEGORICAL_CARDINALITIES,
+        "embedding_dim": args.embedding_dim,
+        "output_dim": len(TARGETS),
+        "dropout": args.dropout,
+    }
+
+    if args.model == "mlp":
+        model_kwargs["hidden_dims"] = hidden_dims
+    elif args.model == "resmlp":
+        model_kwargs["hidden_dim"] = hidden_dims[0] if hidden_dims else 256
+        model_kwargs["num_blocks"] = args.num_blocks
+    elif args.model == "transformer":
+        model_kwargs["embedding_dim"] = args.embedding_dim
+
+    model = build_model(args.model, **model_kwargs)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"Model: {args.model} | params: {n_params:,}")
+
+    # ── Train ─────────────────────────────────────────────────────────
+    trainer = Trainer(
+        model=model,
+        device=args.device,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        scheduler=args.scheduler if args.scheduler != "none" else None,
+        output_scaler=loaders["target_scaler"],
+        use_amp=args.use_amp,
+    )
+
+    metrics = trainer.fit(
+        loaders,
+        epochs=args.epochs,
+        patience=args.patience,
+        ckpt_dir=args.ckpt_dir,
+    )
+
+    # ── Final test evaluation ─────────────────────────────────────────
+    print("\n=== Test Set Evaluation ===")
+    results = trainer.evaluate(loaders["test"], target_names=TARGETS)
+    for k, v in results.items():
+        print(f"  {k}: {v:.6f}")
+
+    # Save results + scalers
+    ckpt_path = Path(args.ckpt_dir)
+    with open(ckpt_path / "test_results.json", "w") as f:
+        json.dump(results, f, indent=2)
+    loaders["input_scaler"].save(str(ckpt_path / "input_scaler.joblib"))
+    loaders["target_scaler"].save(str(ckpt_path / "target_scaler.joblib"))
+
+    print(f"\nDone. Checkpoints saved to {args.ckpt_dir}/")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,18 @@
+# Core
+numpy>=1.24
+pandas>=2.0
+scikit-learn>=1.5
+matplotlib>=3.8
+
+# XGBoost
+xgboost>=2.0
+
+# Rocket simulation
+rocketpy>=1.0
+
+# Deep learning (for neural surrogate)
+torch>=2.0
+
+# Utilities
+tqdm>=4.65
+pyyaml>=6.0

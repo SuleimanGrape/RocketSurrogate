@@ -1,0 +1,29 @@
+# ── Core (install FIRST with ROCm index) ─────────────────────────────────────
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.1
+#
+# For NVIDIA CUDA instead:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# ── Data & ML ────────────────────────────────────────────────────────────────
+numpy>=1.26
+scipy>=1.14
+scikit-learn>=1.5
+joblib>=1.4
+pandas>=2.2
+
+# ── XGBoost (local CPU training) ─────────────────────────────────────────────
+xgboost>=2.0
+
+# ── LLM fine-tuning (cloud ROCm) ─────────────────────────────────────────────
+transformers>=4.44
+trl>=0.11
+peft>=0.13
+accelerate>=0.35
+bitsandbytes>=0.44       # 0.43+ has native ROCm support
+sentencepiece>=0.2       # tokenizers for many LLM architectures
+protobuf>=5.28
+
+# ── Optional but recommended ──────────────────────────────────────────────────
+# flash-attn>=2.6        # faster attention; build from source for ROCm
+# wandb>=0.18            # experiment tracking
+# tensorboard>=2.17      # local metric visualization
