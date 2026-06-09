@@ -4,7 +4,7 @@ Surrogate modeling for rocket flight simulation — cascaded surrogates (XGBoost
 
 This project uses [RocketPy](https://github.com/RocketPy-Team/RocketPy) 6-DOF simulations to generate realistic rocket designs paired with their flight outcomes, trains physics surrogate models, and fine-tunes LLMs for generative design. The cascaded pipeline converts a small set of expensive simulations into an arbitrarily large synthetic corpus, and the closed-loop active learning system enables the LLM and neural surrogate to co-evolve toward better designs.
 
-**Associated paper:** *"Closing the Loop: Active Exploration of Rocket Design Space with LLM Policies and Neural Surrogates"* — see [`docs/paper/`](docs/paper/) for the full draft and formatted document.
+
 
 ## Cascaded Surrogate Pipeline
 
