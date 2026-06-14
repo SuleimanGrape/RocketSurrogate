@@ -174,46 +174,77 @@ def sobol_sample(n: int, seed: int) -> List[Dict[str, Any]]:
 
 
 def balanced_sample(n: int, seed: int) -> List[Dict[str, Any]]:
-    """Sampling with balanced discrete categories."""
+    """Sampling with balanced discrete categories — including motor_class.
+
+    Ensures each motor class gets ~n/10 records regardless of diameter restrictions,
+    so L and M class motors are not squeezed out.
+    """
     rng = np.random.default_rng(seed)
+    n_motor_classes = len(cfg.MOTOR_CLASSES)
 
-    balanced_keys = ["diameter_mm", "nose_type", "fin_count"]
-    balanced_options = [cfg.BODY_DIAMETERS_MM, cfg.NOSE_TYPES, cfg.FIN_COUNTS]
+    # ── Step 1: Distribute motor_class using per-class allocation weights ──
+    # Classes with lower post-validation pass rates (G, H, L, M) get more slots
+    # so the final dataset has balanced motor representation.
+    weights = cfg.PER_CLASS_ALLOCATION_WEIGHTS
+    weight_total = sum(weights[mc] for mc in cfg.MOTOR_CLASSES)
+    motor_assignments = [None] * n
+    motor_positions = {mc: [] for mc in cfg.MOTOR_CLASSES}
+    pos = 0
+    for mc in cfg.MOTOR_CLASSES:
+        count = int(n * weights[mc] / weight_total)
+        if count < 1:
+            count = 1
+        # Distribute rounding surplus to last class
+        if mc == cfg.MOTOR_CLASSES[-1]:
+            count = n - pos
+        motor_assignments[pos:pos + count] = [mc] * count
+        motor_positions[mc] = list(range(pos, pos + count))
+        pos += count
+    rng.shuffle(motor_assignments)
+    # Rebuild motor_positions after shuffle
+    motor_positions = {mc: [] for mc in cfg.MOTOR_CLASSES}
+    for idx, mc in enumerate(motor_assignments):
+        motor_positions[mc].append(idx)
 
-    assignments = {}
+    # ── Step 2: Assign diameters per motor class using allowed-motor rules ──
+    # Reverse lookup: which diameters allow each motor class?
+    motor_to_diameters = {mc: [] for mc in cfg.MOTOR_CLASSES}
+    for d, motor_indices in cfg.ALLOWED_MOTORS_BY_DIAMETER.items():
+        for mi in motor_indices:
+            mc = cfg.MOTOR_CLASSES[mi]
+            motor_to_diameters[mc].append(d)
+
+    diameter_assignments = [None] * n
+    for mc, positions in motor_positions.items():
+        allowed_diams = motor_to_diameters.get(mc, cfg.BODY_DIAMETERS_MM)
+        n_pos = len(positions)
+        base_d, rem_d = divmod(n_pos, len(allowed_diams))
+        diam_col = []
+        for j, d in enumerate(allowed_diams):
+            diam_col.extend([d] * (base_d + (1 if j < rem_d else 0)))
+        rng.shuffle(diam_col)
+        for pos_idx, d in zip(positions, diam_col):
+            diameter_assignments[pos_idx] = d
+
+    # ── Step 3: Assign nose_type and fin_count evenly ──
+    balanced_keys = ["nose_type", "fin_count"]
+    balanced_options = [cfg.NOSE_TYPES, cfg.FIN_COUNTS]
+    assignments = {"diameter_mm": diameter_assignments}
     for key, options in zip(balanced_keys, balanced_options):
-        base, rem = divmod(n, len(options))
+        base_k, rem_k = divmod(n, len(options))
         col = []
         for j, opt in enumerate(options):
-            col.extend([opt] * (base + (1 if j < rem else 0)))
+            col.extend([opt] * (base_k + (1 if j < rem_k else 0)))
         rng.shuffle(col)
         assignments[key] = col
 
-    diameter_assignments = assignments["diameter_mm"]
-    motor_assignments = [None] * n
-
-    from collections import Counter
-    diameter_positions = {}
-    for idx, d in enumerate(diameter_assignments):
-        diameter_positions.setdefault(d, []).append(idx)
-
-    for d, positions in diameter_positions.items():
-        allowed = cfg.ALLOWED_MOTORS_BY_DIAMETER.get(d, list(range(len(cfg.MOTOR_CLASSES))))
-        n_motors = len(allowed)
-        base, rem = divmod(len(positions), n_motors)
-        motor_choices = []
-        for j, mi in enumerate(allowed):
-            motor_choices.extend([cfg.MOTOR_CLASSES[mi]] * (base + (1 if j < rem else 0)))
-        rng.shuffle(motor_choices)
-        for pos, mc in zip(positions, motor_choices):
-            motor_assignments[pos] = mc
-
+    # ── Step 4: Fill continuous parameters ──
     continuous = rng.random((n, NUM_CONTINUOUS))
     params_list = []
 
     for idx in range(n):
         sample = continuous[idx]
-        diameter_mm = assignments["diameter_mm"][idx]
+        diameter_mm = diameter_assignments[idx]
         nose_type = assignments["nose_type"][idx]
         fin_count = assignments["fin_count"][idx]
         motor_class = motor_assignments[idx]

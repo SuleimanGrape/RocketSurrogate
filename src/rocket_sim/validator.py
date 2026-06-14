@@ -33,6 +33,10 @@ def prevalidate(params: dict) -> tuple:
 
     if body_l <= 0:
         return False, "body_length <= 0"
+    # Slenderness ratio: length / diameter > 80 is structurally unrealistic
+    # and breaks Barrowman CP approximations
+    if d_m > 0 and total_length / d_m > 80:
+        return False, f"slenderness {total_length/d_m:.0f}:1 > 80"
     if span > body_l:
         return False, "fin_span > body_length"
     if tip > root:
@@ -69,6 +73,16 @@ def prevalidate(params: dict) -> tuple:
     rail = params["rail_length_m"]
     if total_length > 0 and rail > total_length * 3.0:
         return False, f"rail_length {rail:.1f}m > 3x rocket_length {total_length:.1f}m"
+    # Estimated rail exit velocity: simple constant-acceleration model
+    # Prevents designs that would barely clear the rail (unstable, ODE solver struggles)
+    try:
+        net_force = avg_thrust - total_mass * 9.81
+        if net_force > 0 and rail > 0:
+            v_exit = math.sqrt(2.0 * net_force * rail / total_mass)
+            if v_exit < 10.0:
+                return False, f"estimated rail_exit_velocity {v_exit:.1f} m/s < 10"
+    except Exception:
+        pass
     if nose_l <= 0 or d_m <= 0:
         return False, "non-positive geometry"
     if nose_l > body_l * 1.5:
@@ -97,6 +111,16 @@ def is_valid(params: dict, flight: rocketpy.Flight | None) -> bool:
                 return False
         except Exception:
             pass
+        # Minimum rail exit velocity for safe stable flight
+        try:
+            if hasattr(flight, 'out_of_rail_velocity') and float(flight.out_of_rail_velocity) < 10.0:
+                return False
+        except Exception:
+            pass
+        # Maximum slenderness ratio (length/diameter) for structural realism
+        d_m = params["diameter_mm"] / 1000.0
+        if d_m > 0 and params["length_m"] / d_m > 80:
+            return False
         return True
     except Exception:
         return False

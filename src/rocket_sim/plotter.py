@@ -17,7 +17,7 @@ INPUT_KEYS = [
 
 OUTPUT_KEYS = [
     "apogee_m", "max_velocity_mps", "max_mach", "max_acceleration_mps2",
-    "burnout_altitude_m", "flight_time_s", "landing_velocity_mps",
+    "burnout_altitude_m", "flight_time_s",
     "stability_margin_calibers", "rail_exit_velocity_mps",
     "max_dynamic_pressure_pa",
 ]

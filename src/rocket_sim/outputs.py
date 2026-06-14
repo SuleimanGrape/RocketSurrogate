@@ -1,5 +1,6 @@
 """Extract and structure simulation outputs for JSONL storage."""
 
+import math
 import numpy as np
 import rocketpy
 from utils import compute_cp_barrowman, stability_margin_calibers
@@ -24,25 +25,41 @@ def extract_output(params: dict, flight: rocketpy.Flight) -> dict:
     cg, cp = compute_cp_barrowman(params)
     sm = stability_margin_calibers(cg, cp, params["diameter_mm"])
 
+    # Extract flight trajectory from RocketPy Function objects
+    # flight.z is a Function(time -> altitude); flight.vz is Function(time -> vertical_velocity)
+    # RocketPy 1.12.1: .x_array = time values (raw numpy), .y_array = dependent values (raw numpy)
+    # DO NOT use get_inputs()/get_outputs() — those return string column headers as first element.
     try:
-        t_flight = float(flight.t_final) if hasattr(flight, 't_final') else float(flight.t_impact) if hasattr(flight, 't_impact') else 0.0
+        traj_times = flight.z.x_array
+        traj_altitudes = flight.z.y_array
+        traj_velocities = flight.vz.y_array
     except Exception:
-        t_flight = 0.0
+        traj_times = np.array([])
+        traj_altitudes = np.array([])
+        traj_velocities = np.array([])
 
-    try:
-        landing_v = abs(float(flight.impact_velocity)) if hasattr(flight, 'impact_velocity') and flight.impact_velocity is not None else abs(float(flight.speed(flight.t_final))) if hasattr(flight, 't_final') else 7.0
-    except Exception:
-        landing_v = 7.0
+    # Burnout state: find index closest to burn_time_s in trajectory
+    burnout_alt, burnout_vel = _find_burnout_state(flight, params, traj_times, traj_altitudes, traj_velocities)
+
+    # Time to apogee: find max altitude index in trajectory
+    time_to_apogee = 0.0
+    if len(traj_times) > 0 and len(traj_altitudes) > 0:
+        apex_idx = np.argmax(traj_altitudes)
+        time_to_apogee = float(traj_times[apex_idx])
+
+    # Flight time: last time in trajectory
+    # Note: with terminate_on_apogee=True, this is time-to-apogee, not full flight
+    t_flight = float(traj_times[-1]) if len(traj_times) > 0 else 0.0
 
     return {
         "apogee_m": round(apogee_m, 1),
         "max_velocity_mps": round(max_velocity, 1),
         "max_mach": round(max_mach, 3),
         "max_acceleration_mps2": _safe(lambda: flight.max_acceleration),
-        "burnout_altitude_m": _safe(lambda: flight.burn_out_altitude) if hasattr(flight, 'burn_out_altitude') else _find_burnout_alt(flight, params),
-        "burnout_velocity_mps": _safe(lambda: flight.burn_out_velocity) if hasattr(flight, 'burn_out_velocity') else 0.0,
+        "burnout_altitude_m": round(burnout_alt, 1),
+        "burnout_velocity_mps": round(burnout_vel, 1),
         "flight_time_s": round(t_flight, 1),
-        "landing_velocity_mps": round(landing_v, 2),
+        "time_to_apogee_s": round(time_to_apogee, 1),
         "stability_margin_calibers": round(sm, 2),
         "rail_exit_velocity_mps": _safe(lambda: flight.out_of_rail_velocity) if hasattr(flight, 'out_of_rail_velocity') else 0.0,
         "max_dynamic_pressure_pa": _safe(lambda: flight.max_dynamic_pressure) if hasattr(flight, 'max_dynamic_pressure') else 0.0,
@@ -52,22 +69,28 @@ def extract_output(params: dict, flight: rocketpy.Flight) -> dict:
     }
 
 
-def _find_burnout_alt(flight: rocketpy.Flight, params: dict) -> float:
+def _find_burnout_state(
+    flight: rocketpy.Flight,
+    params: dict,
+    traj_times: np.ndarray,
+    traj_altitudes: np.ndarray,
+    traj_velocities: np.ndarray,
+) -> tuple:
+    """Find (altitude, velocity) at motor burnout via flight trajectory functions.
+
+    RocketPy 1.12.1 stores trajectory data in Function objects (flight.z, flight.vz).
+    Uses the caller-supplied arrays to avoid redundant Function calls.
+    """
     try:
         burn_time = params["burn_time_s"]
-        times = np.array(flight.xArray) if hasattr(flight, 'xArray') else None
-        if times is None and hasattr(flight, 'solution') and hasattr(flight.solution, 't'):
-            times = np.array(flight.solution.t)
-        if times is not None:
-            alts = np.array(flight.yArray) if hasattr(flight, 'yArray') else None
-            if alts is None and hasattr(flight, 'solution') and hasattr(flight.solution, 'y'):
-                alts = np.array(flight.solution.y[2]) if len(flight.solution.y) > 2 else None
-            if alts is not None and len(alts) > 0:
-                idx = np.argmin(np.abs(np.array(times) - burn_time))
-                return float(alts[idx])
+        if len(traj_times) == 0:
+            return 0.0, 0.0
+        idx = np.argmin(np.abs(traj_times - burn_time))
+        alt = float(traj_altitudes[idx])
+        vel = abs(float(traj_velocities[idx]))
+        return alt, vel
     except Exception:
-        pass
-    return 0.0
+        return 0.0, 0.0
 
 
 def extract_input(params: dict) -> dict:

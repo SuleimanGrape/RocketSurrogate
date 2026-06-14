@@ -44,6 +44,9 @@ def _prevalidate_and_simulate(param_dict: dict) -> Optional[dict]:
     except Exception:
         return None
 
+    if flight is None:
+        return None
+
     if not validator.is_valid(param_dict, flight):
         return None
 
@@ -69,7 +72,7 @@ def generate(
     splits_dir: Optional[str] = None,
     plots_dir: Optional[str] = None,
     balanced: bool = True,
-    oversample_factor: float = 3.0,
+    oversample_factor: float = 4.0,
 ) -> None:
     print(f"=== Rocket Data Generator ===")
     print(f"  Target count  : {count}")
@@ -117,7 +120,7 @@ def generate(
         print("ERROR: No designs passed pre-validation.")
         return
 
-    max_to_sim = min(len(pre_valids), count * 2)
+    max_to_sim = min(len(pre_valids), int(count * 3))
     param_list_prevalidated = pre_valids[:max_to_sim]
 
     # Simulation
@@ -142,7 +145,7 @@ def generate(
                       f"{len(results)} valid, {sim_rejected} rejected "
                       f"({rate:.0f} sims/s)")
     else:
-        actual_workers = min(workers, cpu_count() - 1, 8)
+        actual_workers = min(workers, max(1, cpu_count() - 1))
         actual_workers = max(1, actual_workers)
         chunk_size = max(1, len(param_list_prevalidated) // (actual_workers * 4))
         with Pool(processes=actual_workers, initializer=_init_worker) as pool:
@@ -218,7 +221,7 @@ def generate(
     if splits_dir:
         print("\n[5/5] Creating train/val/test splits...")
         from splitter import split_dataset
-        split_dataset(results, splits_dir)
+        split_dataset(results, splits_dir, train_frac=0.7, val_frac=0.15, test_frac=0.15)
 
     if plots_dir:
         print("\n[5/5] Generating summary plots...")
@@ -241,7 +244,7 @@ def main():
     parser.add_argument("--splits-dir", type=str, default=None)
     parser.add_argument("--plots-dir", type=str, default=None)
     parser.add_argument("--no-balanced", action="store_true")
-    parser.add_argument("--oversample", type=float, default=3.0)
+    parser.add_argument("--oversample", type=float, default=4.0)
     args = parser.parse_args()
 
     generate(

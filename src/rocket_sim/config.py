@@ -89,6 +89,23 @@ MAX_MACH = 5.0
 MAX_APOGEE_KM = 100.0
 SIM_TIMEOUT_S = 60
 
+# Per-class allocation weights to compensate for unequal post-validation pass rates.
+# Based on observed survival rates from the v2 2000-sample run:
+#   D: 0.58, E: 0.62, F: 0.42, G: 0.20, H: 0.22, I: 0.33, J: 0.40, K: 0.29, L: 0.20, M: 0.09
+# Weights are inverse of survival rate, normalized so 10 classes → average ~1.0.
+# Classes with low survival (G, H, L, M) get more initial samples allocated.
+PER_CLASS_ALLOCATION_WEIGHTS = {
+    "D": 0.50, "E": 0.47, "F": 0.70,
+    "G": 1.43, "H": 1.34, "I": 0.89,
+    "J": 0.73, "K": 0.99, "L": 1.49, "M": 2.72,
+}
+
+# Per-class simulation timeouts (seconds) — enforced via multiprocessing.Process kill
+SIM_TIMEOUT_BY_CLASS = {
+    "D": 15, "E": 15, "F": 20, "G": 25,
+    "H": 35, "I": 45, "J": 60, "K": 90, "L": 120, "M": 120,
+}
+
 # ── Nose shape to RocketPy type mapping ──────────────────────────────────────
 
 NOSE_TYPE_MAP = {

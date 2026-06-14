@@ -49,32 +49,20 @@ def main():
 
     for i, p in enumerate(params):
         record = {"rocket_id": i + 1, "input": {}, "output": {}, "timing": {}, "status": "pending"}
-        t_build_start = time.time()
+        t0 = time.time()
         try:
-            rocket = rocket_builder.build_rocket(p)
-            t_build = time.time() - t_build_start
+            result = simulator.run_and_extract(p)
+            t_total = time.time() - t0
+            record["timing"]["total_seconds"] = round(t_total, 3)
 
-            t_sim_start = time.time()
-            flight = simulator.run_simulation(rocket, p)
-            t_sim = time.time() - t_sim_start
-            record["timing"]["build_seconds"] = round(t_build, 3)
-            record["timing"]["sim_seconds"] = round(t_sim, 3)
-            record["timing"]["total_seconds"] = round(t_build + t_sim, 3)
-
-            if flight is None:
+            if result is None:
                 record["status"] = "simulation_failed_or_timeout"
                 results.append(record)
                 print(f"    [{i+1:>2}/10] {record['timing']['total_seconds']:.1f}s  FAILED/TIMEOUT")
                 continue
 
-            if not validator.is_valid(p, flight):
-                record["status"] = "post_validation_failed"
-                results.append(record)
-                print(f"    [{i+1:>2}/10] {record['timing']['total_seconds']:.1f}s  POST-VALIDATION FAILED")
-                continue
-
-            out = outputs.extract_output(p, flight)
-            inp = outputs.extract_input(p)
+            inp = result["input"]
+            out = result["output"]
             cg, cp = compute_cp_barrowman(p)
             sm = stability_margin_calibers(cg, cp, p["diameter_mm"])
             record["input"] = inp

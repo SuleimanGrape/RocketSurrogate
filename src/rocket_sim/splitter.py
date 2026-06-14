@@ -8,9 +8,9 @@ from typing import List
 def split_dataset(
     records: List[dict],
     output_dir: str,
-    train_frac: float = 0.8,
-    val_frac: float = 0.1,
-    test_frac: float = 0.1,
+    train_frac: float = 0.7,
+    val_frac: float = 0.15,
+    test_frac: float = 0.15,
     seed: int = 42,
 ) -> dict:
     """Shuffle and split records into train/val/test JSONL files."""

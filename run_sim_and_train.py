@@ -65,23 +65,15 @@ def run_simulations(n=10, seed=42):
     for i, p in enumerate(params):
         record = {"rocket_id": i + 1, "input": {}, "output": {}, "status": "pending"}
         try:
-            rocket = rocket_builder.build_rocket(p)
-            flight = simulator.run_simulation(rocket, p)
-
-            if flight is None:
+            result = simulator.run_and_extract(p)
+            if result is None:
                 record["status"] = "simulation_failed_or_timeout"
                 all_results.append(record)
                 print(f"  [{i+1:>2}/{n}] FAILED/TIMEOUT")
                 continue
 
-            if not validator.is_valid(p, flight):
-                record["status"] = "post_validation_failed"
-                all_results.append(record)
-                print(f"  [{i+1:>2}/{n}] POST-VALIDATION FAILED")
-                continue
-
-            out = outputs_mod.extract_output(p, flight)
-            inp = outputs_mod.extract_input(p)
+            out = result["output"]
+            inp = result["input"]
             cg, cp = compute_cp_barrowman(p)
             sm = stability_margin_calibers(cg, cp, p["diameter_mm"])
             out["cg_m"] = round(cg, 4)

@@ -64,6 +64,12 @@ def add_engineered_features(
     """
     Add physically-motivated engineered features for rocket data.
     These help gradient boost trees capture non-linear relationships.
+
+    Notes:
+        - Computes diameter_m on the fly for derived features but does NOT
+          add it as a separate column (avoids linear dependence on diameter_mm).
+        - Categorical columns (nose_type, motor_class) are passed through
+          unchanged — XGBoost handles them natively.
     """
     import pandas as pd
 
@@ -71,10 +77,13 @@ def add_engineered_features(
     new_features = []
     new_names = []
 
-    # Diameter in meters (derived from diameter_mm)
-    if "diameter_mm" in df.columns:
-        df["diameter_m"] = df["diameter_mm"] / 1000.0
-        new_names.append("diameter_m")
+    # Inline diameter conversion (not stored as a separate feature)
+    def _diam_m():
+        if "diameter_mm" in df.columns:
+            return df["diameter_mm"] / 1000.0
+        return None
+
+    d_m = None  # lazy compute once below
 
     # Total mass
     if "dry_mass_kg" in df.columns and "propellant_mass_kg" in df.columns:
@@ -87,24 +96,27 @@ def add_engineered_features(
         new_names.append("propellant_frac")
 
     # Aspect ratio (length / diameter)
-    if "length_m" in df.columns and "diameter_m" in df.columns:
-        df["aspect_ratio"] = df["length_m"] / (df["diameter_m"] + 1e-9)
+    if "length_m" in df.columns and "diameter_mm" in df.columns:
+        d_m = d_m or _diam_m()
+        df["aspect_ratio"] = df["length_m"] / (d_m + 1e-9)
         new_names.append("aspect_ratio")
 
-    # Motor impulse (thrust * burn_time) and average thrust re-derived
+    # Motor impulse (thrust * burn_time)
     if "avg_thrust_N" in df.columns and "burn_time_s" in df.columns:
         df["motor_impulse_ns"] = df["avg_thrust_N"] * df["burn_time_s"]
         new_names.append("motor_impulse_ns")
 
     # Thrust-to-weight ratio estimate
-    if "avg_thrust_N" in df.columns and "total_mass_kg" in df.columns:
-        df["tw_ratio_est"] = df["avg_thrust_N"] / (df["total_mass_kg"] * 9.81 + 1e-9)
+    if "avg_thrust_N" in df.columns and "dry_mass_kg" in df.columns and "propellant_mass_kg" in df.columns:
+        total_m = df["dry_mass_kg"] + df["propellant_mass_kg"]
+        df["tw_ratio_est"] = df["avg_thrust_N"] / (total_m * 9.81 + 1e-9)
         new_names.append("tw_ratio_est")
 
     # Fin area ratio
-    if all(k in df.columns for k in ["fin_root_chord_m", "fin_tip_chord_m", "fin_span_m", "fin_count", "diameter_m"]):
+    if all(k in df.columns for k in ["fin_root_chord_m", "fin_tip_chord_m", "fin_span_m", "fin_count", "diameter_mm"]):
+        d_m = d_m or _diam_m()
         fin_area = 0.5 * (df["fin_root_chord_m"] + df["fin_tip_chord_m"]) * df["fin_span_m"] * df["fin_count"]
-        body_area = 3.14159 * (df["diameter_m"] / 2) ** 2
+        body_area = 3.14159 * (d_m / 2) ** 2
         df["fin_area_ratio"] = fin_area / (body_area + 1e-9)
         new_names.append("fin_area_ratio")
 
@@ -114,9 +126,23 @@ def add_engineered_features(
         new_names.append("nose_body_ratio")
 
     # Slenderness (volume proxy)
-    if "length_m" in df.columns and "diameter_m" in df.columns:
-        df["slenderness"] = df["length_m"] ** 2 / (df["diameter_m"] + 1e-9)
+    if "length_m" in df.columns and "diameter_mm" in df.columns:
+        d_m = d_m or _diam_m()
+        df["slenderness"] = df["length_m"] ** 2 / (d_m + 1e-9)
         new_names.append("slenderness")
+
+    # Ballistic coefficient proxy: mass / (Cd * cross_section)
+    # Higher = better coasting performance
+    if "dry_mass_kg" in df.columns and "propellant_mass_kg" in df.columns and "diameter_mm" in df.columns:
+        d_m = d_m or _diam_m()
+        cross_section = 3.14159 * (d_m / 2) ** 2
+        df["ballistic_coeff"] = (df["dry_mass_kg"] + df["propellant_mass_kg"]) / (cross_section + 1e-9)
+        new_names.append("ballistic_coeff")
+
+    # Fin loading: fin area per unit span (indicator of pitch damping)
+    if all(k in df.columns for k in ["fin_root_chord_m", "fin_tip_chord_m", "fin_span_m", "fin_count"]):
+        df["fin_loading"] = (df["fin_root_chord_m"] + df["fin_tip_chord_m"]) * df["fin_span_m"] * df["fin_count"]
+        new_names.append("fin_loading")
 
     result_names = feature_names + new_names
     return df[result_names], result_names

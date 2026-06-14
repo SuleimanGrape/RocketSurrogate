@@ -59,7 +59,6 @@ TARGET_FEATURES = [
     "burnout_altitude_m",
     "burnout_velocity_mps",
     "flight_time_s",
-    "landing_velocity_mps",
     "stability_margin_calibers",
     "rail_exit_velocity_mps",
     "max_dynamic_pressure_pa",
@@ -107,15 +106,10 @@ def generate(count: int = 5000, seed: int = 42, output_path: str = None) -> str:
         if len(results) >= count:
             break
         try:
-            rocket = rocket_builder.build_rocket(p)
-            flight = simulator.run_simulation(rocket, p)
-            if flight is None:
+            result = simulator.run_and_extract(p)
+            if result is None:
                 continue
-            if not validator.is_valid(p, flight):
-                continue
-            out = outputs.extract_output(p, flight)
-            inp = outputs.extract_input(p)
-            results.append({"input": inp, "output": out})
+            results.append(result)
         except Exception:
             continue
 

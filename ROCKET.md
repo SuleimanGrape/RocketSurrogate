@@ -155,7 +155,6 @@ Records are stored as JSONL, one per line:
     "burnout_altitude_m": 682.0,
     "burnout_velocity_mps": 185.0,
     "flight_time_s": 196.0,
-    "landing_velocity_mps": 7.10,
     "stability_margin_calibers": 1.80,
     "rail_exit_velocity_mps": 22.5,
     "max_dynamic_pressure_pa": 45000.0,
@@ -209,8 +208,7 @@ Records are stored as JSONL, one per line:
 | `max_acceleration_mps2` | Maximum acceleration | m/s² |
 | `burnout_altitude_m` | Altitude at motor burnout | m |
 | `burnout_velocity_mps` | Velocity at motor burnout | m/s |
-| `flight_time_s` | Total flight time (launch to landing) | s |
-| `landing_velocity_mps` | Vertical speed at ground impact | m/s |
+| `flight_time_s` | Flight time to apogee (sim terminates at apogee) | s |
 | `stability_margin_calibers` | Static margin (CP – CG) / diameter | calibers |
 | `rail_exit_velocity_mps` | Speed at end of launch rail | m/s |
 | `max_dynamic_pressure_pa` | Maximum aerodynamic dynamic pressure | Pa |
