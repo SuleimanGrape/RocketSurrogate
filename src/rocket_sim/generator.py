@@ -12,7 +12,7 @@ import time
 import os
 import sys
 from datetime import datetime, timezone
-from multiprocessing import Pool, cpu_count
+from multiprocessing import cpu_count
 from typing import Optional
 from collections import Counter
 
@@ -123,65 +123,88 @@ def generate(
     max_to_sim = min(len(pre_valids), int(count * 3))
     param_list_prevalidated = pre_valids[:max_to_sim]
 
-    # Simulation
+    # Simulation — process-isolated, streaming, resumable.
+    # Each sim runs in a child process that the parent kills on overrun, so a
+    # hung/leaky RocketPy solve can never accumulate in a long-lived worker.
+    # Workers recycle every cfg.MAXTASKSPERCHILD tasks. Results are appended to
+    # the JSONL as they complete (crash-safe), and an existing output file is
+    # resumed (already-simulated indices are skipped).
     print("[3/5] Running simulations...")
     t0 = time.time()
-    results = []
-    sim_rejected = 0
+    import gen_worker
 
-    if workers <= 1:
-        for i, p in enumerate(param_list_prevalidated):
-            if len(results) >= count:
-                break
-            r = _prevalidate_and_simulate(p)
-            if r is not None:
-                results.append(r)
-            else:
-                sim_rejected += 1
-            if (i + 1) % 50 == 0:
-                elapsed = time.time() - t0
-                rate = (i + 1) / elapsed if elapsed > 0 else 0
-                print(f"  {i+1}/{len(param_list_prevalidated)} simulated, "
-                      f"{len(results)} valid, {sim_rejected} rejected "
-                      f"({rate:.0f} sims/s)")
-    else:
-        actual_workers = min(workers, max(1, cpu_count() - 1))
-        actual_workers = max(1, actual_workers)
-        chunk_size = max(1, len(param_list_prevalidated) // (actual_workers * 4))
-        with Pool(processes=actual_workers, initializer=_init_worker) as pool:
-            for i, r in enumerate(pool.imap_unordered(
-                _prevalidate_and_simulate, param_list_prevalidated, chunksize=chunk_size
-            )):
-                if r is not None:
-                    results.append(r)
+    os.makedirs(os.path.dirname(output) if os.path.dirname(output) else ".", exist_ok=True)
+
+    # Resume: each record carries its stable index into param_list_prevalidated
+    # (deterministic for fixed seed/count/method), so we can skip completed work.
+    results = []
+    done_ids = set()
+    if os.path.exists(output):
+        with open(output) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # tolerate a torn final line from a hard crash
+                if "id" in rec:
+                    done_ids.add(rec["id"])
+                results.append(rec)
+        if done_ids:
+            print(f"  Resume: {len(results)} records already in {output}; "
+                  f"skipping those indices")
+
+    tasks = [(i, p) for i, p in enumerate(param_list_prevalidated) if i not in done_ids]
+    task_ids = [i for i, _ in tasks]
+    task_params = [p for _, p in tasks]
+
+    actual_workers = max(1, min(workers, cpu_count() - 1)) if workers > 1 else 1
+    sim_rejected = 0
+    processed = 0
+
+    if len(results) < count and task_params:
+        with open(output, "a") as fout:
+            for local_idx, res in gen_worker.run_batch(
+                task_params,
+                workers=actual_workers,
+                maxtasksperchild=cfg.MAXTASKSPERCHILD,
+            ):
+                processed += 1
+                if res is not None:
+                    rec = {"id": task_ids[local_idx], **res}
+                    fout.write(json.dumps(rec) + "\n")
+                    fout.flush()
+                    os.fsync(fout.fileno())
+                    results.append(rec)
                 else:
                     sim_rejected += 1
-                if (i + 1) % 50 == 0:
+                if processed % 50 == 0:
                     elapsed = time.time() - t0
-                    rate = (i + 1) / elapsed if elapsed > 0 else 0
-                    print(f"  {i+1}/{len(param_list_prevalidated)} simulated, "
+                    rate = processed / elapsed if elapsed > 0 else 0
+                    print(f"  {processed}/{len(task_params)} simulated, "
                           f"{len(results)} valid, {sim_rejected} rejected "
-                          f"({rate:.0f} sims/s)")
+                          f"({rate:.1f} sims/s)")
                 if len(results) >= count:
-                    pool.terminate()
                     break
 
     t_sim = time.time() - t0
     print(f"  Completed in {t_sim:.1f}s — {len(results)} valid designs "
           f"({sim_rejected} sim/post-sim rejections)")
 
-    if len(results) > count:
-        results = results[:count]
     if not results:
         print("ERROR: No valid designs generated after simulation.")
         return
 
-    # Save
+    # Save — records were already streamed to `output` above. Trim to target if
+    # we overshot (resume + new run can exceed count), keeping the file in sync.
     print("[4/5] Saving data...")
-    os.makedirs(os.path.dirname(output) if os.path.dirname(output) else ".", exist_ok=True)
-    with open(output, "w") as f:
-        for record in results:
-            f.write(json.dumps(record) + "\n")
+    if len(results) > count:
+        results = results[:count]
+        with open(output, "w") as f:
+            for record in results:
+                f.write(json.dumps(record) + "\n")
     print(f"  Saved {len(results)} records to {output}")
 
     meta = {

@@ -1,12 +1,15 @@
-"""RocketPy flight simulation with threading-based timeout.
+"""RocketPy flight simulation.
 
-Uses threading.Thread for the wall-clock timeout. On timeout the daemon
-thread continues running in the background (RocketPy can't be interrupted
-from outside), but per-class timeouts (15-120s vs the old uniform 60s)
-minimize zombie thread accumulation.
+The wall-clock timeout is enforced by the PARENT process (see gen_worker.py):
+each simulation runs synchronously in a disposable child process which the
+parent kills on overrun, so the OS reclaims all solver state and arrays
+regardless of what RocketPy/scipy leaked. ``simulate_flight`` is that
+synchronous entry point.
 
-Designed to run inside multiprocessing.Pool workers — threading avoids the
-"daemonic processes can't have children" restriction that mp.Process hits.
+``run_simulation`` is the legacy thread-based timeout. It is retained only for
+reference/compatibility: a timed-out solve leaves an unkillable daemon thread
+running the integrator in the background, which is the source of the overnight
+memory leak. Do not use it in the generation path.
 """
 
 import os
@@ -18,6 +21,41 @@ import numpy as np
 import rocketpy
 
 import config as cfg
+
+
+def _build_flight(rocket: rocketpy.Rocket, params: dict) -> rocketpy.Flight:
+    """Construct and solve a Flight synchronously. Raises on failure."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        env = rocketpy.Environment(
+            latitude=0, longitude=0, elevation=params["elevation_m"])
+        env.set_atmospheric_model(
+            type="custom_atmosphere",
+            pressure=compute_pressure(params["elevation_m"], params["temperature_c"]),
+            temperature=params["temperature_c"] + 273.15,
+            wind_u=params["wind_speed_mps"] * np.cos(np.radians(params["wind_direction_deg"])),
+            wind_v=params["wind_speed_mps"] * np.sin(np.radians(params["wind_direction_deg"])),
+        )
+        return rocketpy.Flight(
+            rocket=rocket, environment=env,
+            rail_length=params["rail_length_m"],
+            inclination=params["launch_angle_deg"],
+            heading=90, time_overshoot=True,
+            terminate_on_apogee=True, max_time=600, verbose=False,
+        )
+
+
+def simulate_flight(rocket: rocketpy.Rocket, params: dict) -> rocketpy.Flight | None:
+    """Synchronous solve with NO internal timeout.
+
+    Intended to run inside a disposable child process whose wall-clock timeout
+    is enforced by the parent (kill on overrun). Returns Flight on success,
+    None on error.
+    """
+    try:
+        return _build_flight(rocket, params)
+    except Exception:
+        return None
 
 
 def compute_pressure(elevation_m: float, temperature_c: float) -> float:
@@ -41,27 +79,10 @@ def run_simulation(rocket: rocketpy.Rocket, params: dict) -> rocketpy.Flight | N
     result = {"flight": None, "error": None}
 
     def _target():
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            try:
-                env = rocketpy.Environment(
-                    latitude=0, longitude=0, elevation=params["elevation_m"])
-                env.set_atmospheric_model(
-                    type="custom_atmosphere",
-                    pressure=compute_pressure(params["elevation_m"], params["temperature_c"]),
-                    temperature=params["temperature_c"] + 273.15,
-                    wind_u=params["wind_speed_mps"] * np.cos(np.radians(params["wind_direction_deg"])),
-                    wind_v=params["wind_speed_mps"] * np.sin(np.radians(params["wind_direction_deg"])),
-                )
-                result["flight"] = rocketpy.Flight(
-                    rocket=rocket, environment=env,
-                    rail_length=params["rail_length_m"],
-                    inclination=params["launch_angle_deg"],
-                    heading=90, time_overshoot=True,
-                    terminate_on_apogee=True, max_time=600, verbose=False,
-                )
-            except Exception as e:
-                result["error"] = e
+        try:
+            result["flight"] = _build_flight(rocket, params)
+        except Exception as e:
+            result["error"] = e
 
     thread = threading.Thread(target=_target)
     thread.daemon = True

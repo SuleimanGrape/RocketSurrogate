@@ -20,7 +20,7 @@ import threading
 import time
 from collections import Counter
 from datetime import datetime, timezone
-from multiprocessing import Pool, cpu_count
+from multiprocessing import cpu_count
 from typing import Optional
 
 import psutil
@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src", "rocket_sim"))
 import config as cfg
 import parameters as params_mod
 import validator
-from generator import _prevalidate_and_simulate  # noqa: E402
+import gen_worker  # process-isolated pool with hard-kill timeouts + recycling
 
 # ── Global state (accessible from signal handler) ────────────────────────────
 _output_file = None
@@ -402,40 +402,61 @@ def run_with_monitor(
     max_to_sim = min(len(pre_valids), int(count * 3))
     param_list_prevalidated = pre_valids[:max_to_sim]
 
-    # ── Step 3: Run simulations with incremental save ────────────────────────
+    # ── Step 3: Run simulations (process-isolated, incremental save, resumable) ─
+    # Each sim runs in a child process that the parent kills on overrun, so a
+    # hung/leaky RocketPy solve can never accumulate across a long overnight run.
     os.makedirs(os.path.dirname(output) if os.path.dirname(output) else ".", exist_ok=True)
-    _output_file = open(output, "w", encoding="utf-8")
+
+    # Resume: skip indices already present in the output file from a prior run.
+    done_ids = set()
+    if os.path.exists(output):
+        with open(output, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # tolerate a torn final line from a hard crash
+                if "id" in rec:
+                    done_ids.add(rec["id"])
+        if done_ids:
+            print(f"  Resume: {len(done_ids)} records already in {output}; skipping those")
+
+    _output_file = open(output, "a", encoding="utf-8")
 
     print("[3/5] Running simulations (incremental save)...")
     _start_time = time.time()
     _total_simmed = 0
-    _total_valid = 0
-    results = []
+    _total_valid = len(done_ids)
     sim_rejected = 0
 
     signal.signal(signal.SIGINT, _handle_signal)
 
-    actual_workers = min(workers, max(1, cpu_count() - 1))
-    actual_workers = max(1, actual_workers)
-    chunk_size = max(1, len(param_list_prevalidated) // (actual_workers * 4))
+    actual_workers = max(1, min(workers, cpu_count() - 1))
 
-    with Pool(processes=actual_workers, initializer=_init_worker, maxtasksperchild=50) as pool:
-        for r in pool.imap_unordered(
-            _prevalidate_and_simulate, param_list_prevalidated, chunksize=chunk_size
+    tasks = [(i, p) for i, p in enumerate(param_list_prevalidated) if i not in done_ids]
+    task_ids = [i for i, _ in tasks]
+    task_params = [p for _, p in tasks]
+
+    if _total_valid < count and task_params:
+        for local_idx, r in gen_worker.run_batch(
+            task_params,
+            workers=actual_workers,
+            maxtasksperchild=cfg.MAXTASKSPERCHILD,
         ):
             _total_simmed += 1
             if r is not None:
-                results.append(r)
+                with _results_lock:
+                    _results_buffer.append({"id": task_ids[local_idx], **r})
                 _total_valid += 1
             else:
                 sim_rejected += 1
             # Periodic flush
-            if len(results) >= flush_every:
-                _results_buffer = list(results)
-                results = []
+            if len(_results_buffer) >= flush_every:
                 _flush_results()
             if _total_valid >= count:
-                pool.terminate()
                 break
             if _total_simmed % 50 == 0:
                 elapsed = time.time() - _start_time
@@ -446,8 +467,6 @@ def run_with_monitor(
     t_sim = time.time() - _start_time
 
     # Final flush
-    _results_buffer = list(results)
-    results = []
     _flush_results()
     _output_file.close()
 

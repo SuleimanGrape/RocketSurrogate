@@ -106,6 +106,10 @@ SIM_TIMEOUT_BY_CLASS = {
     "H": 35, "I": 45, "J": 60, "K": 90, "L": 120, "M": 120,
 }
 
+# Worker recycling: each child process is replaced after this many completed
+# simulations, bounding any slow residual growth in RocketPy/scipy/numpy.
+MAXTASKSPERCHILD = 10
+
 # ── Nose shape to RocketPy type mapping ──────────────────────────────────────
 
 NOSE_TYPE_MAP = {
