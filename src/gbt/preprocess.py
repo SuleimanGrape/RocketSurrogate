@@ -1,60 +1,14 @@
 #!/usr/bin/env python3
 """Feature preprocessing: scaling, feature engineering, and train/transform consistency."""
 
+import os
+import sys
 import numpy as np
 from typing import Dict, Tuple, Optional
 
-
-class FeatureScaler:
-    """Standard scaler (z-score) that fits on train and transforms all splits."""
-
-    def __init__(self):
-        self.mean_: Optional[np.ndarray] = None
-        self.std_: Optional[np.ndarray] = None
-
-    def fit(self, X: np.ndarray) -> "FeatureScaler":
-        self.mean_ = X.mean(axis=0)
-        self.std_ = X.std(axis=0)
-        # Avoid division by zero for constant features
-        self.std_[self.std_ < 1e-10] = 1.0
-        return self
-
-    def transform(self, X: np.ndarray) -> np.ndarray:
-        if self.mean_ is None:
-            raise RuntimeError("Scaler not fitted. Call fit() first.")
-        return (X - self.mean_) / self.std_
-
-    def fit_transform(self, X: np.ndarray) -> np.ndarray:
-        return self.fit(X).transform(X)
-
-
-class TargetScaler:
-    """Min-max scaler for targets, per-column, fits on train only."""
-
-    def __init__(self):
-        self.min_: Optional[np.ndarray] = None
-        self.max_: Optional[np.ndarray] = None
-
-    def fit(self, Y: np.ndarray) -> "TargetScaler":
-        self.min_ = Y.min(axis=0)
-        self.max_ = Y.max(axis=0)
-        range_ = self.max_ - self.min_
-        range_[range_ < 1e-10] = 1.0
-        self.range_ = range_
-        return self
-
-    def transform(self, Y: np.ndarray) -> np.ndarray:
-        if self.min_ is None:
-            raise RuntimeError("TargetScaler not fitted. Call fit() first.")
-        return (Y - self.min_) / self.range_
-
-    def inverse_transform(self, Y: np.ndarray) -> np.ndarray:
-        if self.min_ is None:
-            raise RuntimeError("TargetScaler not fitted.")
-        return Y * self.range_ + self.min_
-
-    def fit_transform(self, Y: np.ndarray) -> np.ndarray:
-        return self.fit(Y).transform(Y)
+# Shared scalers (z-score for features, min-max for targets).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
+from scalers import StandardScaler as FeatureScaler, MinMaxScaler as TargetScaler  # noqa: F401
 
 
 def add_engineered_features(

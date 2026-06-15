@@ -198,13 +198,8 @@ class Trainer:
         total_mae = 0.0
         n = 0
 
-        # ROCm: torch.amp.autocast('cuda') works on both CUDA and ROCm
-        amp_context = (
-            torch.amp.autocast('cuda', enabled=self.use_amp)
-            if self.use_amp
-            else torch.nullcontext() if not train else torch.enable_grad
-        )
-
+        # ROCm note: torch.amp.autocast('cuda') works on both CUDA and ROCm; it is
+        # applied directly in each branch below (eval also wraps in torch.no_grad()).
         if train:
             for cont, cat, tgt in loader:
                 cont = cont.to(self.device, non_blocking=True)

@@ -9,74 +9,24 @@ extract_input() and extract_output() in Rocket/outputs.py.
 
 from __future__ import annotations
 
+import os
+import sys
 import torch
 import torch.nn as nn
 from typing import List
 
 
 # ---------------------------------------------------------------------------
-# Feature definitions — MUST match extract_input / extract_output keys
+# Feature definitions — single source of truth in common/schema.py
 # ---------------------------------------------------------------------------
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "common"))
+import schema  # noqa: E402
 
-# Continuous scalar inputs from the JSONL "input" object
-CONTINUOUS_FEATURES: List[str] = [
-    "length_m",
-    "nose_length_m",
-    "fin_root_chord_m",
-    "fin_tip_chord_m",
-    "fin_span_m",
-    "fin_sweep_m",
-    "fin_thickness_mm",
-    "dry_mass_kg",
-    "propellant_mass_kg",
-    "burn_time_s",
-    "avg_thrust_N",
-    "wind_speed_mps",
-    "wind_direction_deg",
-    "elevation_m",
-    "temperature_c",
-    "rail_length_m",
-    "launch_angle_deg",
-]
-
-# Categorical inputs (string labels → integer codes via ENCODING_MAPS)
-CATEGORICAL_FEATURES: List[str] = [
-    "diameter_mm",   # 6  classes: 24, 29, 38, 54, 75, 98
-    "nose_type",     # 4  classes: conical, ogive, von_karman, elliptical
-    "fin_count",     # 2  classes: 3, 4
-    "motor_class",   # 10 classes: D, E, F, G, H, I, J, K, L, M
-]
-
-# String → integer encoding for each categorical feature
-ENCODING_MAPS = {
-    "diameter_mm": {24: 0, 29: 1, 38: 2, 54: 3, 75: 4, 98: 5},
-    "nose_type":  {"conical": 0, "ogive": 1, "von_karman": 2, "elliptical": 3},
-    "fin_count":  {3: 0, 4: 1},
-    "motor_class": {
-        "D": 0, "E": 1, "F": 2, "G": 3, "H": 4,
-        "I": 5, "J": 6, "K": 7, "L": 8, "M": 9,
-    },
-}
-
-# Number of classes per categorical feature
-CATEGORICAL_CARDINALITIES = {k: len(v) for k, v in ENCODING_MAPS.items()}
-
-# Regression targets from the JSONL "output" object
-TARGETS: List[str] = [
-    "apogee_m",
-    "max_velocity_mps",
-    "max_mach",
-    "max_acceleration_mps2",
-    "burnout_altitude_m",
-    "burnout_velocity_mps",
-    "flight_time_s",
-    "landing_velocity_mps",
-    "stability_margin_calibers",
-    "rail_exit_velocity_mps",
-    "max_dynamic_pressure_pa",
-    "cg_m",
-    "cp_m",
-]
+CONTINUOUS_FEATURES: List[str] = schema.INPUT_CONTINUOUS
+CATEGORICAL_FEATURES: List[str] = schema.INPUT_CATEGORICAL
+ENCODING_MAPS = schema.ENCODING_MAPS
+CATEGORICAL_CARDINALITIES = schema.CATEGORICAL_CARDINALITIES
+TARGETS: List[str] = schema.TARGETS
 
 
 # ---------------------------------------------------------------------------

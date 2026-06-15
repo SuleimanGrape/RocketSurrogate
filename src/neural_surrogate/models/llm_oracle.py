@@ -8,6 +8,8 @@ and is ROCm-compatible (device='cuda' targets AMD GPUs).
 
 from __future__ import annotations
 
+import os
+import sys
 import json
 import numpy as np
 import torch
@@ -22,14 +24,18 @@ from models.surrogate import (
 )
 from models.scalers import StandardScaler
 
+# Discrete design choices — single source of truth in rocket_sim/config.py.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "rocket_sim"))
+import config as cfg  # noqa: E402
 
-# ── Parameter sampling ranges (mirrors Rocket/parameters.py + config.py) ──
+BODY_DIAMETERS_MM = cfg.BODY_DIAMETERS_MM
+NOSE_TYPES = cfg.NOSE_TYPES
+FIN_COUNTS = cfg.FIN_COUNTS
+MOTOR_CLASSES = cfg.MOTOR_CLASSES
 
-BODY_DIAMETERS_MM = [24, 29, 38, 54, 75, 98]
-NOSE_TYPES = ["conical", "ogive", "von_karman", "elliptical"]
-FIN_COUNTS = [3, 4]
-MOTOR_CLASSES = ["D", "E", "F", "G", "H", "I", "J", "K", "L", "M"]
-
+# NOTE: MOTOR_SPECS / SAMPLING_RANGES below are intentionally looser than
+# config.MOTOR_SPECS — they widen the design space for LLM-oracle exploration,
+# so they are kept local on purpose (not a drift bug).
 # Sampling bounds for continuous parameters
 SAMPLING_RANGES = {
     "length_m":               (0.5, 6.0),

@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 from typing import List
 
 import matplotlib
@@ -9,18 +10,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-INPUT_KEYS = [
-    "diameter_mm", "length_m", "nose_length_m", "fin_count",
-    "fin_root_chord_m", "fin_span_m", "dry_mass_kg", "motor_class",
-    "wind_speed_mps", "elevation_m",
-]
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
+import schema
 
-OUTPUT_KEYS = [
-    "apogee_m", "max_velocity_mps", "max_mach", "max_acceleration_mps2",
-    "burnout_altitude_m", "flight_time_s",
-    "stability_margin_calibers", "rail_exit_velocity_mps",
-    "max_dynamic_pressure_pa",
-]
+INPUT_KEYS = schema.PLOT_INPUT_KEYS
+OUTPUT_KEYS = schema.PLOT_OUTPUT_KEYS
 
 
 def _extract_field(records: List[dict], field: str, sub: str = "input") -> list:

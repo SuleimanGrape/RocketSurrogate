@@ -262,3 +262,296 @@ Values shifted slightly upward because the slenderness constraint eliminated ver
 ---
 
 *See also: `IMPLEMENTATION.md`, `memory/simulation-run.md`*
+
+---
+
+# Appendix: v1 dataset audit (historical, from rocketresearch)
+
+_Merged from rocketresearch/data-quality-review.md — the initial 2k (seed 42) audit
+that motivated the v2 fixes documented above._
+
+# RocketSurrogate Data Quality Review & Fix Plan
+
+**Date:** 2026-06-06
+**Review of:** 2000-sample balanced dataset (`outputs/rocket_data_2k.jsonl`)
+**Simulation time:** 42,821s (~11.9 hours)
+**Target:** Fix data quality issues before large-scale generation
+
+---
+
+## 1. Generation Summary
+
+| Stage | Sampled | Pre-validated | Simulated | Valid | Rate |
+|---|---|---|---|---|---|
+| Count | 6,000 | 5,607 | ~4,000 | **2,000** | Pre-val: **93.4%** |
+| | | | | | Sim→valid: **50%** |
+
+The pre-validation pass rate of 93.4% matches the project's stated ~94% — physics-based constraints are working well. However, the simulation success rate of only 50% means 2× oversampling was necessary, and the total generation took 5-6× longer than projected (11.9h vs 2-3h estimate).
+
+---
+
+## 2. Critical Bug: Burnout Extraction Broken (All Records Affected)
+
+**Observation:** `burnout_altitude_m`, `burnout_velocity_mps`, `time_to_apogee_s`, and `landing_velocity_mps` are **ALL ZERO** across every single record in every dataset:
+- 2000-sample dataset: 2000/2000 zero
+- 100-sample dataset: 100/100 zero
+- 10-rocket benchmark: 8/8 zero
+- new_10_simulations: 8/8 zero
+
+**Root Cause (`src/rocket_sim/outputs.py`):**
+
+The `_find_burnout_state()` function tries to access `flight.solution`, but **`Flight.solution` does not exist in RocketPy 1.12.1**. I verified this directly:
+
+```python
+# What the code tries (BROKEN):
+flight.solution.t      # AttributeError — solution doesn't exist
+flight.solution.y      # AttributeError
+flight.burn_out_altitude  # AttributeError
+flight.burn_out_velocity  # AttributeError  
+
+# What RocketPy 1.12.1 DOES provide:
+flight.z              # Function object: .get_inputs() -> times, .get_outputs() -> altitudes
+flight.vz             # Function object: .get_outputs() -> vertical velocities
+flight.speed          # Function object for total speed
+flight.solution_array # Raw ODE data (may be usable as backup)
+flight.apogee         # Scalar (confirmed working — apogee_m is populated correctly)
+```
+
+The old code's fallback `_safe()` wrapper also catches the AttributeError silently and returns 0.0, masking the bug.
+
+### ⚠️ Correction — `get_inputs()` Returns String Headers
+
+RocketPy 1.12.1 `Function.get_inputs()` returns a Python **list** where the **first element is the string column name** (`'Time (s)'`), followed by numeric values. Similarly, `get_outputs()` starts with `'Z (m)'`. Using `np.array()` on these will fail with `could not convert string to float`.
+
+**Working API (verified via debug):**
+- `flight.z.x_array` — numpy array of time values ✅
+- `flight.z.y_array` — numpy array of altitude values ✅  
+- `flight.vz.x_array` — numpy array of time values ✅
+- `flight.vz.y_array` — numpy array of vertical velocity values ✅
+- `flight.z.source` — 2D numpy array `[[t0, z0], [t1, z1], ...]` ✅
+- `flight.z(t)` — callable, returns altitude at time t ✅
+
+### Fix Plan
+
+**File:** `src/rocket_sim/outputs.py`
+
+Replace `_find_burnout_state()` to use `.x_array` / `.y_array`:
+
+```python
+def _find_burnout_state(flight: rocketpy.Flight, params: dict) -> tuple:
+    """Find (altitude, velocity) at motor burnout via flight trajectory Functions."""
+    try:
+        burn_time = params["burn_time_s"]
+        times = flight.z.x_array
+        altitudes = flight.z.y_array
+        velocities = flight.vz.y_array
+        idx = np.argmin(np.abs(times - burn_time))
+        return float(altitudes[idx]), abs(float(velocities[idx]))
+    except Exception:
+        return 0.0, 0.0
+```
+
+Replace `time_to_apogee` extraction:
+```python
+times = flight.z.x_array
+altitudes = flight.z.y_array
+apex_idx = np.argmax(altitudes)
+time_to_apogee = float(times[apex_idx]) if len(times) > 0 else 0.0
+```
+
+Replace `landing_velocity` extraction:
+```python
+velocities = flight.vz.y_array
+landing_v = abs(float(velocities[-1])) if len(velocities) > 0 else 0.0
+```
+
+Replace `t_flight` extraction:
+```python
+times = flight.z.x_array
+t_flight = float(times[-1]) if len(times) > 0 else 0.0
+```
+
+---
+
+## 3. Motor Class Imbalance
+
+### Current Distribution
+
+| Motor | Count | % | Issue |
+|---|---|---|---|
+| D | 262 | 13.1% | OK |
+| E | 369 | 18.4% | OK |
+| F | 307 | 15.3% | OK |
+| G | 223 | 11.2% | OK |
+| H | 217 | 10.8% | OK |
+| I | 220 | 11.0% | OK |
+| J | 246 | 12.3% | OK |
+| K | 118 | 5.9% | Low |
+| L | 34 | **1.7%** | **Severely low** |
+| M | 4 | **0.2%** | **Severely low** |
+
+**Root Cause:** The `balanced_sample()` function in `parameters.py` balances `diameter_mm`, `nose_type`, and `fin_count` evenly, but motor_class is assigned only within each diameter group proportionally. Since L/M motors are only allowed on 98mm/75mm diameters (24.5% of dataset), they get severely squeezed.
+
+### Fix Plan
+
+**File:** `src/rocket_sim/parameters.py`
+
+Add motor_class as a fourth balancing dimension. Approach:
+
+1. Compute target per-class quotas: `n_per_class = max(count // 10, min_target)`
+2. For each of the 10 motor classes, pre-assign its quota across records
+3. For each class, determine which diameters are allowed, distribute across them evenly
+4. Fill remaining records (rounding surplus) with existing balanced logic
+5. Ensure per-diameter motor balances are maintained
+
+This guarantees each motor class gets ~10% of the dataset (or a floor minimum) regardless of diameter restrictions.
+
+---
+
+## 4. Simulation Efficiency: 11.9h vs Projected 2-3h
+
+### Analysis
+
+The 2000-sample run used 6 workers on a 16-core CPU. Two likely causes for the 5-6× slowdown:
+
+1. **Worker contention:** `multiprocessing.Pool` with 6 workers — each RocketPy simulation internally uses its own thread pool for ODE solving. 6 workers × RocketPy's internal threads may cause CPU oversubscription and context-switch thrashing.
+
+2. **Uneven simulation times:** Small motors (D-G) finish in <1s, but large motors (K-M) can take 30-60+ seconds. The uniform 60s timeout wastes time on motors that would finish faster, and simultaneously is too short for some heavy-lift flights.
+
+### Fix Plan
+
+**File:** `src/rocket_sim/config.py` — Add per-class timeouts:
+```python
+SIM_TIMEOUT_BY_CLASS = {
+    "D": 15, "E": 15, "F": 20, "G": 25,
+    "H": 35, "I": 45, "J": 60, "K": 90, "L": 120, "M": 120,
+}
+```
+
+**File:** `src/rocket_sim/simulator.py` — Use per-class timeout:
+```python
+timeout = cfg.SIM_TIMEOUT_BY_CLASS.get(params["motor_class"], cfg.SIM_TIMEOUT_S)
+```
+
+**File:** `src/rocket_sim/generator.py` — Reduce workers from 6 to 4:
+```python
+actual_workers = min(workers, cpu_count() - 2, 4)  # was min(workers, cpu_count() - 1, 8)
+```
+
+Also increase the oversample factor for K/M/L class motors to compensate for their lower simulation pass rates.
+
+---
+
+## 5. Missing Post-Validation Constraints
+
+### Unsafe Rail Exit Velocity
+
+**Finding:** 155/2000 (7.8%) designs have rail exit velocity < 10 m/s (minimum safe for stable flight). 16/2000 (0.8%) have < 5 m/s, with a minimum of **0.17 m/s** — essentially falling off the rail.
+
+### Extreme Slenderness
+
+**Finding:** 256/2000 (12.8%) designs have length/diameter > 100:1. These are structurally unrealistic — the Barrowman CP approximation and rigid-body assumptions break down at these aspect ratios.
+
+### Fix Plan
+
+**File:** `src/rocket_sim/validator.py` — Add new post-validation checks in `is_valid()`:
+
+```python
+# Min rail exit velocity (safety)
+try:
+    if float(flight.out_of_rail_velocity) < 10.0:
+        return False
+except Exception:
+    pass
+
+# Max slenderness ratio (structural realism)  
+d_m = params["diameter_mm"] / 1000.0
+if d_m > 0 and params["length_m"] / d_m > 80:
+    return False
+```
+
+---
+
+## 6. Additional Improvements
+
+### Split Ratio Correction
+
+**File:** `src/rocket_sim/splitter.py`
+
+The splitter defaults to 80/10/10 but `ROCKET.md` specifies 70/15/15. Fix the defaults:
+```python
+def split_dataset(..., val_frac=0.15, test_frac=0.15, ...):
+```
+
+### Remove `diameter_m` Feature Dependence
+
+The preprocess.py fix (removing `diameter_m` from stored features) was already applied in code. The old trained model still has it — verify the new data generation doesn't reintroduce it. No code change needed; just verify before the large run.
+
+---
+
+## 7. Data Distribution Reference
+
+### Categorical Balance (Current — Pre-fix)
+
+| diameter_mm | nose_type | fin_count |
+|---|---|---|
+| 24mm: 21.9% | conical: 24.4% | 3: 49.8% |
+| 29mm: 21.9% | ogive: 26.6% | 4: 50.2% |
+| 38mm: 19.1% | von_karman: 23.9% | |
+| 54mm: 12.6% | elliptical: 24.9% | |
+| 75mm: 12.0% | | |
+| 98mm: 12.5% | | |
+
+These are reasonable. Motor class (see §3 above) is the problem.
+
+### Output Distribution Skew
+
+| Output | Range | Median | Mean | Heavy tail? |
+|---|---|---|---|---|
+| apogee_m | 227-33,026 | 3,686 | 4,574 | Yes (5.8% outliers) |
+| max_velocity_mps | 50.8-1,761 | 240 | 329 | Yes (7.8% outliers) |
+| max_mach | 0.16-5.0 | 0.72 | 0.97 | Yes (7.6% outliers) |
+| max_acceleration_mps2 | 43-956 | 136 | 173 | Yes (9.1% outliers) |
+| flight_time_s | 4.7-62.2 | 19.5 | 20.4 | Slight (1.2% outliers) |
+| max_dynamic_pressure_pa | 1,538-1.4M | 30,791 | 93,071 | Heavy (12.9% outliers) |
+
+The heavy right-skew in most outputs is physically expected (small/large motor dichotomy). The XGBoost model handles this well with tree-based splits. For neural surrogates, log transform of `max_dynamic_pressure_pa` and `apogee_m` may help.
+
+---
+
+## 8. Verification Steps After Fixes
+
+1. **Burnout extraction** — Run 10 rockets, verify: `burnout_altitude_m > 0`, `burnout_velocity_mps > 0`, `time_to_apogee_s > 0`, `landing_velocity_mps > 0`
+2. **Motor class balance** — Generate 500 samples, check all 10 classes have >25 records each
+3. **Rail exit velocity** — Verify no designs below 10 m/s
+4. **Slenderness** — Verify no designs exceed 80:1 slenderness
+5. **Speed** — 100-sample benchmark should complete in <15 minutes (4 workers)
+6. **Full run** — Proceed with large-scale target only after 1-5 pass
+
+---
+
+*See also: `IMPLEMENTATION.md`, `memory/simulation-run.md`*
+
+---
+
+## 9. Current Implementation Status (As of 2026-06-06)
+
+The following code changes have been **applied** in this session:
+
+| Fix | File | Status |
+|---|---|---|
+| Burnout extraction — first pass | `outputs.py` | ❌ **Broken** — uses `get_inputs()`/`get_outputs()` which return string headers |
+| Per-class simulation timeouts | `config.py` | ✅ Added `SIM_TIMEOUT_BY_CLASS` dict |
+| Per-class timeout usage | `simulator.py` | ✅ Uses `cfg.SIM_TIMEOUT_BY_CLASS.get(params["motor_class"])` |
+| Rail exit & slenderness validation | `validator.py` | ✅ Added both checks in `is_valid()` |
+| Motor class balancing (4th dimension) | `parameters.py` | ✅ `balanced_sample()` now pre-allocates motor classes evenly |
+| Worker count reduction (6→4) | `generator.py` | ✅ Changed `min(..., 8)` to `min(..., 4)` |
+| Explicit split fractions | `generator.py` | ✅ Passes `train_frac=0.7, val_frac=0.15, test_frac=0.15` |
+| Split defaults | `splitter.py` | ✅ Changed defaults to 0.7/0.15/0.15 |
+
+### What the next session must do first
+
+1. **Fix `outputs.py`** — Replace every `flight.z.get_inputs()` with `flight.z.x_array` and `flight.z.get_outputs()` with `flight.z.y_array`. Same for `flight.vz`. The `.x_array`/`.y_array` attributes are raw numpy arrays with no string headers.
+2. **Run the 10-rocket test** — `python run_ten_rockets.py --seed 42` to verify burnout extraction now returns non-zero values.
+3. **Run 100-sample test** — `python -m src.rocket_sim.generator --count 100 --workers 4 --output outputs/test_smoke.jsonl --plots-dir outputs/plots_test` to verify motor class balance and validation constraints.
+4. **Proceed to large-scale generation** after 1-3 pass.

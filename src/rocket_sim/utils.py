@@ -127,13 +127,6 @@ def _cp_fins(n_fins: int, root_chord: float, tip_chord: float,
     return cn, x_from_le, total_fins_area
 
 
-def compute_fin_cn_limit(n_fins: int, root_chord: float, tip_chord: float,
-                         body_diameter: float, nose_cn: float, nose_cp: float,
-                         max_sm_cal: float, d_m: float) -> Tuple[float, float]:
-    """Placeholder for max fin span CN limit. Returns (0, 0)."""
-    return 0.0, 0.0
-
-
 def compute_cp_barrowman(params: dict) -> Tuple[float, float]:
     """Compute CP and CG positions from nose tip via Barrowman equations."""
     d = params["diameter_mm"] / 1000.0

@@ -155,6 +155,7 @@ Records are stored as JSONL, one per line:
     "burnout_altitude_m": 682.0,
     "burnout_velocity_mps": 185.0,
     "flight_time_s": 196.0,
+    "time_to_apogee_s": 18.0,
     "stability_margin_calibers": 1.80,
     "rail_exit_velocity_mps": 22.5,
     "max_dynamic_pressure_pa": 45000.0,
@@ -209,11 +210,17 @@ Records are stored as JSONL, one per line:
 | `burnout_altitude_m` | Altitude at motor burnout | m |
 | `burnout_velocity_mps` | Velocity at motor burnout | m/s |
 | `flight_time_s` | Flight time to apogee (sim terminates at apogee) | s |
+| `time_to_apogee_s` | Time from launch to apogee | s |
 | `stability_margin_calibers` | Static margin (CP – CG) / diameter | calibers |
 | `rail_exit_velocity_mps` | Speed at end of launch rail | m/s |
 | `max_dynamic_pressure_pa` | Maximum aerodynamic dynamic pressure | Pa |
 | `cg_m` | Center of gravity from nose tip | m |
 | `cp_m` | Center of pressure from nose tip (Barrowman) | m |
+
+> The canonical input/output field lists and categorical encodings live in
+> `src/common/schema.py` (the single source of truth, verified by
+> `tests/test_schema.py`). The simulation terminates at apogee, so there is no
+> `landing_velocity_mps`. `time_to_apogee_s` is produced but not yet modelled.
 
 ## Motor Specifications
 
@@ -312,13 +319,21 @@ RocketSurrogate/
 ├── ROCKET.md                     # This file — detailed technical documentation
 ├── requirements.txt
 ├── run_ten_rockets.py            # Timing benchmark script
-├── run_gen.bat                   # Batch file for data generation
+├── run_generation.ps1            # Data-generation launcher (PowerShell)
+├── run_with_monitor.py           # Resilient generator: health log + resume
+├── bench_memory.py               # Memory-leak before/after benchmark
 ├── src/
+│   ├── common/                   # Shared, dependency-light modules
+│   │   ├── schema.py             # SINGLE SOURCE OF TRUTH for input/output fields
+│   │   ├── scalers.py            # StandardScaler / MinMaxScaler (shared)
+│   │   └── dataio.py             # load_jsonl
 │   ├── rocket_sim/               # Data generation pipeline
 │   │   ├── config.py             # Parameter ranges, motor specs, validation bounds
 │   │   ├── parameters.py         # Sampling strategies
 │   │   ├── rocket_builder.py     # RocketPy Rocket/Motor construction
-│   │   ├── simulator.py          # Flight simulation with timeout
+│   │   ├── simulator.py          # Synchronous flight solve (simulate_flight)
+│   │   ├── gen_worker.py         # Process-isolated pool: hard-kill timeout + recycling
+│   │   ├── generator.py          # Generation orchestrator (streaming JSONL + resume)
 │   │   ├── validator.py          # Two-stage validation
 │   │   ├── outputs.py            # Output extraction + JSONL serialization
 │   │   ├── utils.py              # CG, Barrowman CP, stability
@@ -327,6 +342,7 @@ RocketSurrogate/
 │   ├── gbt/                      # XGBoost surrogate models
 │   │   ├── data_loader.py        # JSONL loading
 │   │   ├── preprocess.py         # Feature engineering
+│   │   ├── synthetic_data.py     # Generation wrapper for training
 │   │   ├── model.py              # XGBoost training
 │   │   ├── evaluate.py           # Metrics, plots
 │   │   └── train.py              # Entry point

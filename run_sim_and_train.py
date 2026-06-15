@@ -65,7 +65,15 @@ def run_simulations(n=10, seed=42):
     for i, p in enumerate(params):
         record = {"rocket_id": i + 1, "input": {}, "output": {}, "status": "pending"}
         try:
-            result = simulator.run_and_extract(p)
+            result = None
+            try:
+                rocket = rocket_builder.build_rocket(p)
+                flight = simulator.simulate_flight(rocket, p)
+                if flight is not None and validator.is_valid(p, flight):
+                    result = {"input": outputs_mod.extract_input(p),
+                              "output": outputs_mod.extract_output(p, flight)}
+            except Exception:
+                result = None
             if result is None:
                 record["status"] = "simulation_failed_or_timeout"
                 all_results.append(record)

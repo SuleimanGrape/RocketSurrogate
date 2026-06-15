@@ -5,11 +5,15 @@ Used by both the pure NN trainer and the XGBoost trainer (via make_splits).
 
 from __future__ import annotations
 
-import json
+import os
+import sys
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 from typing import Tuple, Optional, Dict, List
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "common"))
+from dataio import load_jsonl  # noqa: F401  (re-exported for callers)
 
 from models.scalers import StandardScaler
 from models.surrogate import (
@@ -18,21 +22,6 @@ from models.surrogate import (
     TARGETS,
     ENCODING_MAPS,
 )
-
-
-# ---------------------------------------------------------------------------
-# JSONL → numpy arrays
-# ---------------------------------------------------------------------------
-
-def load_jsonl(path: str) -> List[Dict]:
-    """Load a JSONL file where each line is {"input": {...}, "output": {...}}."""
-    records = []
-    with open(path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-    return records
 
 
 def records_to_arrays(

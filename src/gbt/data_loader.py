@@ -1,25 +1,19 @@
 #!/usr/bin/env python3
 """Load and split rocket data from JSONL files matching generator.py format."""
 
-import json
+import os
+import sys
 import numpy as np
 import pandas as pd
 from typing import Tuple, List, Dict, Optional
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
+import schema
+from dataio import load_jsonl  # noqa: F401  (re-exported for callers)
+
 
 # Categorical columns that XGBoost handles natively
-CATEGORICAL_COLS = {"nose_type", "motor_class"}
-
-
-def load_jsonl(path: str) -> List[Dict]:
-    """Load records from a JSONL file. Each line is {"input": {...}, "output": {...}}."""
-    records = []
-    with open(path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-    return records
+CATEGORICAL_COLS = schema.XGB_CATEGORICAL_COLS
 
 
 def extract_arrays(

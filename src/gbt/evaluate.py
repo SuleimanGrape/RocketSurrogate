@@ -202,7 +202,7 @@ def plot_training_curves(
 
         fig, ax = plt.subplots(figsize=(10, 4))
         rmses = [t["val_rmse"] for t in trials]
-        best_so_far = np.minimum.accumsum(rmses) if hasattr(np, 'accumsum') else np.array([min(rmses[:i+1]) for i in range(len(rmses))])
+        best_so_far = np.minimum.accumulate(rmses)
         ax.plot(range(1, len(rmses) + 1), rmses, "bo-", alpha=0.5, label="Trial RMSE")
         ax.plot(range(1, len(rmses) + 1), best_so_far, "r-", lw=2, label="Best so far")
         ax.set_xlabel("Trial")

@@ -7,8 +7,6 @@ import torch
 import random
 from typing import Optional
 
-from models.surrogate import ENCODING_MAPS, CONTINUOUS_FEATURES, CATEGORICAL_FEATURES, TARGETS
-
 
 def set_seed(seed: int = 42):
     """Make results reproducible across numpy, torch, and python."""

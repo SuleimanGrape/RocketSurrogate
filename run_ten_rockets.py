@@ -22,6 +22,21 @@ import outputs
 from utils import compute_cp_barrowman, stability_margin_calibers
 
 
+def _simulate_one(p: dict):
+    """Synchronous build → simulate → validate → extract. Returns dict or None."""
+    try:
+        rocket = rocket_builder.build_rocket(p)
+    except Exception:
+        return None
+    flight = simulator.simulate_flight(rocket, p)
+    if flight is None or not validator.is_valid(p, flight):
+        return None
+    try:
+        return {"input": outputs.extract_input(p), "output": outputs.extract_output(p, flight)}
+    except Exception:
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run 10 rocket simulations with timing.")
     parser.add_argument("--seed", type=int, default=42)
@@ -51,7 +66,7 @@ def main():
         record = {"rocket_id": i + 1, "input": {}, "output": {}, "timing": {}, "status": "pending"}
         t0 = time.time()
         try:
-            result = simulator.run_and_extract(p)
+            result = _simulate_one(p)
             t_total = time.time() - t0
             record["timing"]["total_seconds"] = round(t_total, 3)
 
@@ -76,7 +91,7 @@ def main():
 
         except Exception as e:
             record["status"] = f"error: {str(e)}"
-            record["timing"]["total_seconds"] = round(time.time() - t_build_start, 3)
+            record["timing"]["total_seconds"] = round(time.time() - t0, 3)
             print(f"    [{i+1:>2}/10] {record['timing']['total_seconds']:.1f}s  ERROR: {e}")
 
         results.append(record)
