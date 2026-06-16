@@ -333,7 +333,7 @@ def run_with_monitor(
     splits_dir: Optional[str] = None,
     plots_dir: Optional[str] = None,
     balanced: bool = True,
-    oversample_factor: float = 4.0,
+    oversample_factor: float = 5.0,
     monitor_interval: float = 5.0,
     flush_every: int = 100,
 ):
@@ -565,7 +565,7 @@ def main():
     parser.add_argument("--splits-dir", type=str, default=None)
     parser.add_argument("--plots-dir", type=str, default=None)
     parser.add_argument("--no-balanced", action="store_true")
-    parser.add_argument("--oversample", type=float, default=4.0)
+    parser.add_argument("--oversample", type=float, default=5.0)
     parser.add_argument("--monitor-interval", type=float, default=5.0)
     parser.add_argument("--flush-every", type=int, default=100)
     args = parser.parse_args()

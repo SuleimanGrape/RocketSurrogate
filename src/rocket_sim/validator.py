@@ -9,7 +9,8 @@ import numpy as np
 import rocketpy
 
 import config as cfg
-from utils import compute_cp_barrowman, stability_margin_calibers
+from utils import (compute_cp_barrowman, stability_margin_calibers,
+                   estimate_peak_performance)
 
 DRY_MASS_TO_PROPELLANT_MIN = 1.5
 
@@ -92,6 +93,20 @@ def prevalidate(params: dict) -> tuple:
     prop_density = 1815.0
     if prop_mass > body_volume * prop_density * 0.8:
         return False, "propellant_mass exceeds body capacity"
+
+    # Cheap drag-aware performance gate: skip designs that will clearly bust the
+    # Mach/apogee caps in simulation. Thresholds are calibrated for zero
+    # false-reject (see config.PREVAL_EST_*), so this only removes near-certain
+    # post-sim rejections before the expensive RocketPy solve.
+    try:
+        est_apogee, est_mach = estimate_peak_performance(params)
+        if est_mach > cfg.PREVAL_EST_MACH_MAX:
+            return False, f"estimated Mach {est_mach:.1f} > {cfg.PREVAL_EST_MACH_MAX} cap"
+        if est_apogee > cfg.PREVAL_EST_APOGEE_MAX_M:
+            return False, (f"estimated apogee {est_apogee/1000:.0f} km > "
+                           f"{cfg.PREVAL_EST_APOGEE_MAX_M/1000:.0f} km cap")
+    except Exception:
+        pass
 
     return True, "ok"
 

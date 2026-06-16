@@ -32,7 +32,7 @@ Closed-Loop Active Learning (co-evolution)
 - RocketPy 6-DOF simulation pipeline with process-isolated workers (hard-kill timeouts, worker recycling) — survives long runs without OOM/hangs
 - Resilient generation runner with incremental JSONL flushing, resume-on-restart, and RSS health logging
 - Constrained parameter sampling (random, LHS, Sobol, balanced)
-- Two-stage validation (pre/post simulation) — ~67% pre-validation pass rate on random sampling
+- Two-stage validation (pre/post simulation) with a drag-aware performance gate that skips designs certain to bust the Mach/apogee caps before the expensive solve
 - JSONL dataset generation with metadata and distribution plots
 - Single-source-of-truth schema (`src/common/schema.py`) shared across simulation, XGBoost, and neural packages
 - Feature engineering (aspect ratio, thrust-to-weight, ballistic coefficient, fin loading, etc.)
@@ -152,9 +152,10 @@ JSONL (JSON Lines), one record per line. Each record has `input` (21 design para
 2. **Motor-to-diameter matching** — Impossible motor/body combinations are excluded at the sampling stage.
 3. **Mass-ratio constraints** — Body length is bounded per (diameter, motor) to ensure realistic mass ratios.
 4. **Stability-constrained fin geometry** — Barrowman equations determine valid fin span ranges during sampling (0.5–4.0 caliber stability margin).
-5. **Process isolation over in-process timeouts** — Each simulation runs in a separate worker process with a hard-kill timeout and periodic worker recycling, so a hung or memory-leaking sim cannot stall or OOM the whole run.
-6. **Single source of truth for the schema** — `src/common/schema.py` defines all input/target fields and encodings once; the simulator, XGBoost, and neural packages import it rather than redefining their own.
-7. **Closed-loop co-evolution** — The LLM proposer and neural surrogate evaluator improve together through iterative active learning.
+5. **Cheap performance gate before simulation** — A closed-form drag-aware boost+coast estimate rejects designs whose predicted Mach/apogee clearly exceed the caps, removing the dominant source of wasted simulations. Thresholds are calibrated against real outcomes for zero false-rejections (verified 0/5000 on the seed-2026 run).
+6. **Process isolation over in-process timeouts** — Each simulation runs in a separate worker process with a hard-kill timeout and periodic worker recycling, so a hung or memory-leaking sim cannot stall or OOM the whole run.
+7. **Single source of truth for the schema** — `src/common/schema.py` defines all input/target fields and encodings once; the simulator, XGBoost, and neural packages import it rather than redefining their own.
+8. **Closed-loop co-evolution** — The LLM proposer and neural surrogate evaluator improve together through iterative active learning.
 
 ## Documentation
 

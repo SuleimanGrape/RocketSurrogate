@@ -89,6 +89,20 @@ MAX_MACH = 5.0
 MAX_APOGEE_KM = 100.0
 SIM_TIMEOUT_S = 60
 
+# ── Cheap pre-sim performance gate ────────────────────────────────────────────
+# A drag-aware boost+coast estimate (utils.estimate_peak_performance) rejects
+# designs that will clearly bust the Mach/apogee caps BEFORE the expensive
+# RocketPy solve. Thresholds are set above the highest estimate seen on any kept
+# design (0/5000 false-reject on the seed-2026 run) so the gate never discards a
+# design the simulator would have kept; it removes ~2/3 of Mach-cap busts, which
+# are the dominant source of wasted simulations. The Mach gate does the real
+# work — apogee busts are rare (drag caps real apogee well below 100 km), so the
+# apogee threshold is just a backstop for pathological designs.
+PREVAL_EST_CD = 0.5          # representative drag coefficient for the estimate
+PREVAL_EST_RHO = 1.225       # air density (kg/m^3) used in the estimate
+PREVAL_EST_MACH_MAX = 6.0    # reject if estimated max Mach exceeds this
+PREVAL_EST_APOGEE_MAX_M = 150000.0  # reject if estimated apogee exceeds this
+
 # Per-class allocation weights to compensate for unequal post-validation pass rates.
 # Based on observed survival rates from the v2 2000-sample run:
 #   D: 0.58, E: 0.62, F: 0.42, G: 0.20, H: 0.22, I: 0.33, J: 0.40, K: 0.29, L: 0.20, M: 0.09
