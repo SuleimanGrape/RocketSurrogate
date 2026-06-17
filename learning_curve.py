@@ -55,6 +55,12 @@ EARLY_STOP = 30
 # Targets highlighted individually on the plot (the rest fold into the mean).
 KEY_TARGETS = ["apogee_m", "max_velocity_mps", "max_mach", "stability_margin_calibers"]
 
+# Optional: targets trained on log1p(y) (inverted at predict) for heavy tails.
+# Tested on max_acceleration_mps2 (mean 255, spikes to 2000) — it did NOT help
+# (R^2 0.771 -> 0.761), so the set is empty. The plateau there is inherent
+# noise/feature limitation, not a scale problem. Kept as a hook for future use.
+LOG_TARGETS = set()
+
 
 def _fingerprint(inp: dict) -> str:
     return hashlib.md5(
@@ -93,9 +99,12 @@ def train_eval(Xtr, Ytr, Xva, Yva, Xte, Yte, feat_names, target_names):
     out = {}
     dtest = xgb.DMatrix(Xte, feature_names=feat_names, enable_categorical=True)
     for i, name in enumerate(target_names):
-        dtrain = xgb.DMatrix(Xtr, label=Ytr[:, i], feature_names=feat_names,
+        log_t = name in LOG_TARGETS
+        ytr = np.log1p(Ytr[:, i]) if log_t else Ytr[:, i]
+        yva = np.log1p(Yva[:, i]) if log_t else Yva[:, i]
+        dtrain = xgb.DMatrix(Xtr, label=ytr, feature_names=feat_names,
                              enable_categorical=True)
-        dval = xgb.DMatrix(Xva, label=Yva[:, i], feature_names=feat_names,
+        dval = xgb.DMatrix(Xva, label=yva, feature_names=feat_names,
                            enable_categorical=True)
         model = xgb.train(
             XGB_PARAMS, dtrain, num_boost_round=NUM_BOOST_ROUND,
@@ -104,6 +113,8 @@ def train_eval(Xtr, Ytr, Xva, Yva, Xte, Yte, feat_names, target_names):
             verbose_eval=False,
         )
         pred = model.predict(dtest)
+        if log_t:
+            pred = np.expm1(pred)        # invert to the original scale before scoring
         out[name] = r2(Yte[:, i], pred)
     return out
 

@@ -10,6 +10,19 @@ from typing import Dict, Tuple, Optional
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
 from scalers import StandardScaler as FeatureScaler, MinMaxScaler as TargetScaler  # noqa: F401
 
+# Closed-form Barrowman cg/cp/stability margin (exact functions of the geometry).
+# Adding them as features lets the trees read off the otherwise hard-to-predict
+# stability margin (a small (cp-cg) difference) without any target leakage.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rocket_sim"))
+from utils import compute_cp_barrowman, stability_margin_calibers  # noqa: E402
+
+# Inputs compute_cp_barrowman needs; the features are only added when all present.
+_BARROWMAN_INPUTS = [
+    "diameter_mm", "length_m", "nose_length_m", "nose_type", "fin_count",
+    "fin_root_chord_m", "fin_tip_chord_m", "fin_span_m",
+    "dry_mass_kg", "propellant_mass_kg",
+]
+
 
 def add_engineered_features(
     X: np.ndarray,
@@ -101,6 +114,21 @@ def add_engineered_features(
     if all(k in df.columns for k in ["fin_root_chord_m", "fin_tip_chord_m", "fin_span_m", "fin_count"]):
         df["fin_loading"] = (df["fin_root_chord_m"] + df["fin_tip_chord_m"]) * df["fin_span_m"] * df["fin_count"]
         new_names.append("fin_loading")
+
+    # Barrowman cg/cp/stability margin — exact closed-form from the geometry.
+    if all(k in df.columns for k in _BARROWMAN_INPUTS):
+        def _barrowman(row):
+            params = {k: row[k] for k in _BARROWMAN_INPUTS}
+            cg, cp = compute_cp_barrowman(params)
+            return pd.Series({
+                "barrowman_cg_m": cg,
+                "barrowman_cp_m": cp,
+                "barrowman_margin_cal": stability_margin_calibers(cg, cp, row["diameter_mm"]),
+            })
+        bw = df.apply(_barrowman, axis=1)
+        for col in ("barrowman_cg_m", "barrowman_cp_m", "barrowman_margin_cal"):
+            df[col] = bw[col]
+            new_names.append(col)
 
     result_names = feature_names + new_names
     return df[result_names], result_names

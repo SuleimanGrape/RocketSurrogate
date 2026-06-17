@@ -16,10 +16,17 @@ from dataio import load_jsonl  # noqa: F401  (re-exported for callers)
 CATEGORICAL_COLS = schema.XGB_CATEGORICAL_COLS
 
 
+def _is_positive(rec: Dict) -> bool:
+    """A within-bounds (computable) record. Negatives carry within_bounds=False
+    and no numeric targets; legacy records without the field are positive."""
+    return rec.get("output", {}).get("within_bounds") is not False
+
+
 def extract_arrays(
     records: List[Dict],
     input_features: Optional[List[str]] = None,
     output_targets: Optional[List[str]] = None,
+    classification: bool = False,
 ) -> Tuple[pd.DataFrame, np.ndarray, List[str], List[str]]:
     """
     Extract feature matrix X and target matrix Y from records.
@@ -27,36 +34,54 @@ def extract_arrays(
     Args:
         records: list of {"input": {...}, "output": {...}} dicts
         input_features: which input keys to use (None = all)
-        output_targets: which output keys to predict (None = all)
+        output_targets: which output keys to predict (None = all; regression only)
+        classification: if True, keep ALL records and return the binary
+            within_bounds label (1=computable, 0=not) as a 1-D Y. If False
+            (default, regression), drop negative records first so missing-target
+            designs never reach the regressors.
 
     Returns:
         X: (n_samples, n_features) DataFrame with categorical dtypes preserved
-        Y: (n_samples, n_targets) array
+        Y: regression -> (n_samples, n_targets) float array;
+           classification -> (n_samples,) int array of within_bounds labels
         feature_names: list of feature name strings
-        target_names: list of target name strings
+        target_names: list of target name strings (["within_bounds"] if classifying)
     """
     if not records:
         raise ValueError("No records to extract.")
 
-    # Auto-detect feature/target names from first record
+    if classification:
+        used = records
+        y = np.array([1 if _is_positive(r) else 0 for r in used], dtype=np.int64)
+        target_names = ["within_bounds"]
+    else:
+        used = [r for r in records if _is_positive(r)]
+        if not used:
+            raise ValueError("No positive (within_bounds) records to extract.")
+
+    # Auto-detect feature/target names from the first used record
     if input_features is None:
-        input_features = sorted(records[0]["input"].keys())
-    if output_targets is None:
-        output_targets = sorted(records[0]["output"].keys())
+        input_features = sorted(used[0]["input"].keys())
+    if not classification and output_targets is None:
+        # Canonical numeric targets (excludes the motor_class passthrough and the
+        # within_bounds label, which are not regression targets).
+        output_targets = list(schema.TARGETS)
 
     # Build X as DataFrame with categorical dtypes for XGBoost native support
     X_dict = {}
     for k in input_features:
-        col = [r["input"][k] for r in records]
+        col = [r["input"][k] for r in used]
         if k in CATEGORICAL_COLS:
             X_dict[k] = pd.Categorical(col)
         else:
             X_dict[k] = col
     X = pd.DataFrame(X_dict, columns=input_features)
 
-    # Build Y as numpy array (targets are all numeric — motor_class excluded from targets)
-    Y = np.array([[r["output"][k] for k in output_targets] for r in records], dtype=np.float64)
+    if classification:
+        return X, y, input_features, target_names
 
+    # Build Y as numpy array (targets are all numeric — motor_class excluded from targets)
+    Y = np.array([[r["output"][k] for k in output_targets] for r in used], dtype=np.float64)
     return X, Y, input_features, output_targets
 
 

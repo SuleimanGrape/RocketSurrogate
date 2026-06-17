@@ -32,6 +32,11 @@ import config as cfg
 import parameters as params_mod
 import validator
 import gen_worker  # process-isolated pool with hard-kill timeouts + recycling
+from outputs import extract_input  # same input schema for positives and negatives
+
+# Output written for a rejected ("not computable") design — the negative class
+# of the within_bounds feasibility label. No numeric targets, no reason.
+_NEG_OUTPUT = {"within_bounds": False}
 
 # ── Global state (accessible from signal handler) ────────────────────────────
 _output_file = None
@@ -436,6 +441,7 @@ def run_with_monitor(
     print("[2/5] Pre-validating parameters...")
     t0 = time.time()
     pre_valids = []
+    pre_rejects = []          # designs that fail the cheap gate → negative class
     pre_reject_reasons = Counter()
     n_dup_skipped = 0
     for p in param_list:
@@ -448,6 +454,7 @@ def run_with_monitor(
         if ok:
             pre_valids.append(p)
         else:
+            pre_rejects.append(p)
             pre_reject_reasons[reason] += 1
     if n_dup_skipped:
         print(f"  Skipped {n_dup_skipped} duplicate designs "
@@ -473,8 +480,11 @@ def run_with_monitor(
     # hung/leaky RocketPy solve can never accumulate across a long overnight run.
     os.makedirs(os.path.dirname(output) if os.path.dirname(output) else ".", exist_ok=True)
 
-    # Resume: skip indices already present in the output file from a prior run.
+    # Resume: skip ids already present in the output file from a prior run.
+    # done_valid counts only positive (within_bounds) records so negatives can
+    # never inflate the valid count or trip the target early.
     done_ids = set()
+    done_valid = 0
     if os.path.exists(output):
         with open(output, encoding="utf-8") as f:
             for line in f:
@@ -487,18 +497,41 @@ def run_with_monitor(
                     continue  # tolerate a torn final line from a hard crash
                 if "id" in rec:
                     done_ids.add(rec["id"])
+                if rec.get("output", {}).get("within_bounds") is not False:
+                    done_valid += 1
         if done_ids:
-            print(f"  Resume: {len(done_ids)} records already in {output}; skipping those")
+            print(f"  Resume: {len(done_ids)} records already in {output} "
+                  f"({done_valid} valid); skipping those")
 
     _output_file = open(output, "a", encoding="utf-8")
 
     print("[3/5] Running simulations (incremental save)...")
     _start_time = time.time()
     _total_simmed = 0
-    _total_valid = len(done_ids)
+    _total_valid = done_valid
     sim_rejected = 0
+    n_neg = 0  # negative-class (within_bounds=False) records written this run
 
     signal.signal(signal.SIGINT, _handle_signal)
+
+    # Negative ids live above the positive/sim id space (which is one id per
+    # prevalidated design) so the two never collide and resume stays stable.
+    neg_id_base = len(param_list_prevalidated)
+
+    # Pre-validation rejects: cheap negatives. Stream them through the same
+    # buffer/flush/resume path as everything else.
+    for j, p in enumerate(pre_rejects):
+        nid = neg_id_base + j
+        if nid in done_ids:
+            continue
+        with _results_lock:
+            _results_buffer.append({"id": nid, "input": extract_input(p),
+                                    "output": dict(_NEG_OUTPUT)})
+        n_neg += 1
+        if len(_results_buffer) >= flush_every:
+            _flush_results()
+    if pre_rejects:
+        print(f"  Captured {n_neg} pre-validation rejects as within_bounds=False")
 
     actual_workers = max(1, min(workers, cpu_count() - 1))
 
@@ -518,7 +551,15 @@ def run_with_monitor(
                     _results_buffer.append({"id": task_ids[local_idx], **r})
                 _total_valid += 1
             else:
+                # Passed the cheap gate but timed out / failed post-sim validity:
+                # a genuinely "not computable" design — the valuable negative.
+                with _results_lock:
+                    _results_buffer.append(
+                        {"id": task_ids[local_idx],
+                         "input": extract_input(task_params[local_idx]),
+                         "output": dict(_NEG_OUTPUT)})
                 sim_rejected += 1
+                n_neg += 1
             # Periodic flush
             if len(_results_buffer) >= flush_every:
                 _flush_results()
@@ -544,18 +585,25 @@ def run_with_monitor(
         _monitor.stop()
         return
 
-    # ── Step 4: Reload & truncate ────────────────────────────────────────────
+    # ── Step 4: Reload, then truncate POSITIVES to the target ────────────────
+    # The file mixes positives (within_bounds=True, full targets) and negatives
+    # (within_bounds=False, no targets). Only positives count toward --count;
+    # all negatives are kept. Splits/plots use positives only.
     all_results = []
     with open(output, "r") as f:
         for line in f:
             line = line.strip()
             if line:
                 all_results.append(json.loads(line))
-    if len(all_results) > count:
-        all_results = all_results[:count]
-        with open(output, "w") as f:
-            for rec in all_results:
-                f.write(json.dumps(rec) + "\n")
+    positives = [r for r in all_results if r.get("output", {}).get("within_bounds") is not False]
+    negatives = [r for r in all_results if r.get("output", {}).get("within_bounds") is False]
+    if len(positives) > count:
+        positives = positives[:count]
+    # Rewrite the canonical file = kept positives + all negatives.
+    all_results = positives + negatives
+    with open(output, "w") as f:
+        for rec in all_results:
+            f.write(json.dumps(rec) + "\n")
 
     # ── Metadata ─────────────────────────────────────────────────────────────
     meta_path = output.replace(".jsonl", "_metadata.json")
@@ -566,14 +614,18 @@ def run_with_monitor(
         "balanced": balanced,
         "rocketpy_version": "1.12.1",
         "target_count": count,
-        "actual_count": len(all_results),
+        "actual_count": len(positives),
         "completed": True,
+        "labels": {
+            "within_bounds_true": len(positives),
+            "within_bounds_false": len(negatives),
+        },
         "sampling": {
             "n_sampled": n_to_sample,
             "n_prevalidated": len(pre_valids),
             "n_simulated": len(param_list_prevalidated),
             "prevalidation_rate": round(len(pre_valids) / max(1, n_to_sample), 3),
-            "simulation_rate": round(len(all_results) / max(1, len(param_list_prevalidated)), 3),
+            "simulation_rate": round(len(positives) / max(1, len(param_list_prevalidated)), 3),
         },
         "dedup": {
             "exclude_files": exclude or [],
@@ -592,17 +644,20 @@ def run_with_monitor(
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     print(f"  Metadata     : {meta_path}")
+    print(f"  Labels       : {len(positives)} within_bounds / "
+          f"{len(negatives)} not-computable")
 
+    # Balance, splits, and plots are regression artifacts — positives only.
     print("\n  Dataset balance:")
     for key in ["diameter_mm", "nose_type", "fin_count", "motor_class"]:
-        counter = Counter(r["input"][key] for r in all_results)
+        counter = Counter(r["input"][key] for r in positives)
         print(f"    {key}: {dict(sorted(counter.items()))}")
 
     if splits_dir:
         print(f"\n[4/5] Creating train/val/test splits...")
         try:
             from splitter import split_dataset
-            split_dataset(all_results, splits_dir, train_frac=0.7, val_frac=0.15, test_frac=0.15)
+            split_dataset(positives, splits_dir, train_frac=0.7, val_frac=0.15, test_frac=0.15)
         except Exception as e:
             print(f"  Splits skipped: {e}")
 
@@ -610,7 +665,7 @@ def run_with_monitor(
         print(f"[5/5] Generating summary plots...")
         try:
             from plotter import generate_plots
-            generate_plots(all_results, plots_dir)
+            generate_plots(positives, plots_dir)
         except Exception as e:
             print(f"  Plots skipped: {e}")
 
