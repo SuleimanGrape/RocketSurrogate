@@ -124,6 +124,16 @@ SIM_TIMEOUT_BY_CLASS = {
 # simulations, bounding any slow residual growth in RocketPy/scipy/numpy.
 MAXTASKSPERCHILD = 10
 
+# Memory self-regulation (prevents OOM regardless of worker count) ─────────────
+# A child is recycled immediately once its resident set exceeds this, so a single
+# heavy/leaky solve cannot sit holding memory across many tasks. 0 disables.
+WORKER_RSS_LIMIT_MB = 1800
+# Backpressure: when system RAM use rises above the high-water mark, the pool
+# stops dispatching new tasks and lets in-flight work drain until use falls back
+# below the low-water mark. Concurrency throttles itself instead of OOM-ing.
+RAM_HIGH_WATER_PCT = 85.0
+RAM_LOW_WATER_PCT = 75.0
+
 # ── Nose shape to RocketPy type mapping ──────────────────────────────────────
 
 NOSE_TYPE_MAP = {

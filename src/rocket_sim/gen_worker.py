@@ -16,6 +16,18 @@ the OS reclaims *everything* the solve allocated regardless of leaks. A killed
 or recycled child is replaced with a fresh one. Workers are also recycled
 after ``maxtasksperchild`` completed tasks to bound any slow residual growth.
 
+Memory self-regulation
+----------------------
+A fixed task count is blind to whether a worker is actually bloated, so two
+runtime guards make the pool regulate against real memory instead of a guessed
+worker count:
+  * **RSS-based recycling** — a child is recycled the moment its resident set
+    exceeds ``worker_rss_limit_mb``, so one heavy/leaky solve cannot hold memory
+    across many tasks.
+  * **System-RAM backpressure** — when total RAM use crosses ``ram_high_water``
+    the pool stops dispatching and lets in-flight tasks drain until it falls
+    below ``ram_low_water``. Concurrency throttles itself rather than OOM-ing.
+
 Public API
 ----------
 ``run_batch(batch, ...)`` yields ``(index, result_or_None)`` in completion
@@ -29,6 +41,8 @@ import time
 import queue
 import multiprocessing as mp
 from typing import Optional
+
+import psutil  # already a dependency (health logging); used here for RSS/RAM
 
 # Ensure this package dir is importable in spawned children (spawn propagates
 # the parent's sys.path, but be defensive if imported oddly).
@@ -82,8 +96,10 @@ def _worker_loop(in_q, out_q):
     """
     # RocketPy pulls in matplotlib; force the non-interactive backend so no GUI
     # canvas state is ever created in a worker.
+    import gc
     import matplotlib
     matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
     import warnings
     warnings.filterwarnings("ignore")
 
@@ -99,6 +115,12 @@ def _worker_loop(in_q, out_q):
             res = _simulate_one(param)
         except Exception:
             res = None
+        finally:
+            # Hygiene: RocketPy retains Function/matplotlib state per solve;
+            # drop it so per-task growth (and the parent's recycling burden)
+            # stays small.
+            plt.close("all")
+            gc.collect()
         out_q.put((idx, res))
 
 
@@ -128,6 +150,13 @@ class _Slot:
     @property
     def busy(self) -> bool:
         return self.cur_idx is not None
+
+    def rss_mb(self) -> float:
+        """Resident memory of the child process in MB (0.0 if unavailable)."""
+        try:
+            return psutil.Process(self.proc.pid).memory_info().rss / (1024 * 1024)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError, ValueError):
+            return 0.0
 
     def dispatch(self, idx, param):
         self.cur_idx = idx
@@ -197,12 +226,18 @@ def run_batch(
     per_sim_timeout: Optional[float] = None,
     force_timeout: Optional[float] = None,
     poll_interval: float = 0.2,
+    worker_rss_limit_mb: float = cfg.WORKER_RSS_LIMIT_MB,
+    ram_high_water: float = cfg.RAM_HIGH_WATER_PCT,
+    ram_low_water: float = cfg.RAM_LOW_WATER_PCT,
 ):
     """Run ``batch`` through process-isolated workers; yield (idx, result).
 
     - Each task runs in a child process; on wall-clock overrun the child is
       killed (OS reclaims all memory) and the task yields ``(idx, None)``.
-    - Workers recycle after ``maxtasksperchild`` tasks to bound slow growth.
+    - Workers recycle after ``maxtasksperchild`` tasks, and immediately once a
+      child's RSS exceeds ``worker_rss_limit_mb`` (0 disables), bounding growth.
+    - Dispatch pauses while system RAM is above ``ram_high_water`` and resumes
+      below ``ram_low_water``, so concurrency throttles itself instead of OOM-ing.
     - Results are yielded in completion order as they arrive.
     """
     n = len(batch)
@@ -218,17 +253,35 @@ def run_batch(
     completed = 0
     timeouts = {}           # idx -> deadline timestamp for in-flight tasks
     resolved = set()        # idx already yielded (guards kill/late-result races)
+    throttled = False       # backpressure state (hysteresis between water marks)
 
     try:
         while completed < n:
-            # 1) Dispatch queued work to idle workers.
-            for s in slots:
-                if not s.busy and next_task < n:
-                    idx = next_task
-                    next_task += 1
-                    s.dispatch(idx, batch[idx])
-                    timeouts[idx] = s.started + _timeout_for(
-                        batch[idx], force_timeout, per_sim_timeout)
+            # 0) Backpressure: above the high-water mark, stop dispatching and
+            #    let in-flight tasks drain; resume only below the low-water mark.
+            ram_pct = psutil.virtual_memory().percent
+            if throttled:
+                if ram_pct < ram_low_water:
+                    throttled = False
+            elif ram_pct >= ram_high_water:
+                throttled = True
+
+            # 1) Dispatch queued work to idle workers (unless throttled). While
+            #    throttled, instead reclaim idle workers that have accumulated
+            #    memory — this actively drives RAM down and prevents a stall
+            #    where every worker is idle but holding RSS above low-water.
+            if not throttled:
+                for s in slots:
+                    if not s.busy and next_task < n:
+                        idx = next_task
+                        next_task += 1
+                        s.dispatch(idx, batch[idx])
+                        timeouts[idx] = s.started + _timeout_for(
+                            batch[idx], force_timeout, per_sim_timeout)
+            else:
+                for s in slots:
+                    if not s.busy and s.done_count > 0:
+                        s.recycle()  # resets done_count; fresh child holds ~nothing
 
             # 2) Drain any finished results (non-blocking).
             drained = False
@@ -242,7 +295,9 @@ def run_batch(
                 for s in slots:
                     if s.cur_idx == idx:
                         s.mark_done()
-                        if maxtasksperchild and s.done_count >= maxtasksperchild:
+                        if ((maxtasksperchild and s.done_count >= maxtasksperchild)
+                                or (worker_rss_limit_mb
+                                    and s.rss_mb() > worker_rss_limit_mb)):
                             s.recycle()
                         break
                 # A late result for a task we already killed/abandoned: drop it.
