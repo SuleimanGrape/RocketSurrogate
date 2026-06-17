@@ -66,6 +66,10 @@ def extract_output(params: dict, flight: rocketpy.Flight) -> dict:
         "cg_m": round(cg, 4),
         "cp_m": round(cp, 4),
         "motor_class": params["motor_class"],
+        # Computability label: a successful extract is, by definition, within
+        # bounds. Timed-out / not-computable designs are labelled False where
+        # their records are emitted (negative-class generation).
+        "within_bounds": True,
     }
 
 

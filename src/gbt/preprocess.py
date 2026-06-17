@@ -51,7 +51,8 @@ def add_engineered_features(
 
     # Aspect ratio (length / diameter)
     if "length_m" in df.columns and "diameter_mm" in df.columns:
-        d_m = d_m or _diam_m()
+        if d_m is None:
+            d_m = _diam_m()
         df["aspect_ratio"] = df["length_m"] / (d_m + 1e-9)
         new_names.append("aspect_ratio")
 
@@ -68,7 +69,8 @@ def add_engineered_features(
 
     # Fin area ratio
     if all(k in df.columns for k in ["fin_root_chord_m", "fin_tip_chord_m", "fin_span_m", "fin_count", "diameter_mm"]):
-        d_m = d_m or _diam_m()
+        if d_m is None:
+            d_m = _diam_m()
         fin_area = 0.5 * (df["fin_root_chord_m"] + df["fin_tip_chord_m"]) * df["fin_span_m"] * df["fin_count"]
         body_area = 3.14159 * (d_m / 2) ** 2
         df["fin_area_ratio"] = fin_area / (body_area + 1e-9)
@@ -81,14 +83,16 @@ def add_engineered_features(
 
     # Slenderness (volume proxy)
     if "length_m" in df.columns and "diameter_mm" in df.columns:
-        d_m = d_m or _diam_m()
+        if d_m is None:
+            d_m = _diam_m()
         df["slenderness"] = df["length_m"] ** 2 / (d_m + 1e-9)
         new_names.append("slenderness")
 
     # Ballistic coefficient proxy: mass / (Cd * cross_section)
     # Higher = better coasting performance
     if "dry_mass_kg" in df.columns and "propellant_mass_kg" in df.columns and "diameter_mm" in df.columns:
-        d_m = d_m or _diam_m()
+        if d_m is None:
+            d_m = _diam_m()
         cross_section = 3.14159 * (d_m / 2) ** 2
         df["ballistic_coeff"] = (df["dry_mass_kg"] + df["propellant_mass_kg"]) / (cross_section + 1e-9)
         new_names.append("ballistic_coeff")

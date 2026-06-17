@@ -24,6 +24,11 @@ def check(cond, msg):
     print(f"  OK: {msg}")
 
 
+class _DummyFlight:
+    """Attribute-less stand-in: extract_output's _safe/hasattr guards fall back
+    to defaults, so we exercise the schema (keys, within_bounds) without a sim."""
+
+
 def main():
     # 1) extract_input keys == schema.INPUT_FIELDS (exact order).
     sample = params_mod.balanced_sample(64, seed=0)[0]
@@ -48,6 +53,16 @@ def main():
           "landing_velocity_mps removed from TARGETS")
     check("time_to_apogee_s" in schema.TARGETS,
           "time_to_apogee_s present in TARGETS")
+
+    # 4b) within_bounds computability label: produced by extract_output, True for
+    #     a real (successful) flight, and kept OUT of the regression TARGETS.
+    out = outputs.extract_output(sample, _DummyFlight())
+    check(schema.WITHIN_BOUNDS_FIELD in out,
+          "extract_output emits the within_bounds label")
+    check(out[schema.WITHIN_BOUNDS_FIELD] is True,
+          "within_bounds is True for a successful flight")
+    check(schema.WITHIN_BOUNDS_FIELD not in schema.TARGETS,
+          "within_bounds is not a regression target")
 
     # 5) neural surrogate consumes the same schema.
     sys.path.insert(0, os.path.join(ROOT, "src", "neural_surrogate"))

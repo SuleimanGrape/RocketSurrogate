@@ -92,6 +92,14 @@ TARGETS = [
 # Non-target field carried through extract_output for bookkeeping (an input echo).
 OUTPUT_PASSTHROUGH = ["motor_class"]
 
+# Binary computability label written on every output record: True when the
+# simulator resolved the design within the validity/timeout bounds, False for
+# designs that time out or are otherwise not computable (that negative-class data
+# is generated separately so the surrogate can learn what is not computable).
+# This is a CLASSIFICATION target, deliberately kept out of the numeric
+# regression TARGETS above.
+WITHIN_BOUNDS_FIELD = "within_bounds"
+
 # ── Display subsets (for plotter.py distribution plots) ────────────────────────
 PLOT_INPUT_KEYS = [
     "diameter_mm", "length_m", "nose_length_m", "fin_count",
