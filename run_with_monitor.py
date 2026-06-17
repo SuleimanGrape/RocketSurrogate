@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import signal
@@ -46,6 +47,51 @@ _monitor = None  # SystemHealthMonitor instance
 _seed = 42
 _method = "random"
 _balanced = True
+
+
+# =============================================================================
+#  Duplicate exclusion (content fingerprint — matches consolidate_dataset.py)
+# =============================================================================
+
+_FP_CAT_FIELDS = ["diameter_mm", "nose_type", "fin_count", "motor_class"]
+_FP_CONT_PRECISION = {
+    "length_m": 3, "nose_length_m": 3, "fin_root_chord_m": 3,
+    "fin_tip_chord_m": 3, "fin_span_m": 3, "fin_sweep_m": 3,
+    "fin_thickness_mm": 1, "dry_mass_kg": 2, "propellant_mass_kg": 3,
+    "burn_time_s": 2, "avg_thrust_N": 0, "wind_speed_mps": 1,
+    "wind_direction_deg": 0, "elevation_m": 0, "temperature_c": 1,
+    "rail_length_m": 2, "launch_angle_deg": 1,
+}
+
+
+def _design_fingerprint(inp: dict) -> str:
+    """Sim-equivalent fingerprint of a design's input parameters."""
+    parts = [f"{k}={inp[k]}" for k in _FP_CAT_FIELDS]
+    for k, prec in _FP_CONT_PRECISION.items():
+        parts.append(f"{k}={round(float(inp[k]), prec)}")
+    return hashlib.md5("|".join(parts).encode()).hexdigest()
+
+
+def _load_exclude_fingerprints(paths) -> set:
+    """Collect input fingerprints from prior dataset JSONL files to skip."""
+    fps = set()
+    for path in paths or []:
+        if not os.path.exists(path):
+            print(f"  WARNING: exclude file not found: {path}")
+            continue
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                inp = rec.get("input")
+                if inp:
+                    fps.add(_design_fingerprint(inp))
+    return fps
 
 
 # =============================================================================
@@ -336,6 +382,7 @@ def run_with_monitor(
     oversample_factor: float = 5.0,
     monitor_interval: float = 5.0,
     flush_every: int = 100,
+    exclude: Optional[list] = None,
 ):
     global _output_file, _results_buffer, _total_simmed, _total_valid
     global _target_count, _start_time, _monitor, _seed, _method, _balanced
@@ -375,17 +422,36 @@ def run_with_monitor(
         param_list = params_mod.random_sample(n_to_sample, seed)
     print(f"  Sampled {len(param_list)} sets in {time.time()-t0:.1f}s")
 
+    # ── Step 1b: Load duplicate-exclusion fingerprints ───────────────────────
+    # Skip any design already present in prior dataset files (--exclude) and
+    # drop intra-run exact/sim-equivalent collisions, so a new seed never
+    # re-adds a design already in the corpus.
+    exclude_fps = _load_exclude_fingerprints(exclude)
+    if exclude:
+        print(f"  Excluding {len(exclude_fps)} fingerprints from "
+              f"{len(exclude)} prior file(s)")
+    seen_fps = set(exclude_fps)
+
     # ── Step 2: Pre-validation ───────────────────────────────────────────────
     print("[2/5] Pre-validating parameters...")
     t0 = time.time()
     pre_valids = []
     pre_reject_reasons = Counter()
+    n_dup_skipped = 0
     for p in param_list:
+        fp = _design_fingerprint(p)
+        if fp in seen_fps:
+            n_dup_skipped += 1
+            continue
+        seen_fps.add(fp)
         ok, reason = validator.prevalidate(p)
         if ok:
             pre_valids.append(p)
         else:
             pre_reject_reasons[reason] += 1
+    if n_dup_skipped:
+        print(f"  Skipped {n_dup_skipped} duplicate designs "
+              f"(already in corpus or sampled twice)")
     print(f"  Pre-validated in {time.time()-t0:.1f}s")
     print(f"  Passed: {len(pre_valids)}/{len(param_list)} "
           f"({100*len(pre_valids)/len(param_list):.1f}%)")
@@ -509,6 +575,11 @@ def run_with_monitor(
             "prevalidation_rate": round(len(pre_valids) / max(1, n_to_sample), 3),
             "simulation_rate": round(len(all_results) / max(1, len(param_list_prevalidated)), 3),
         },
+        "dedup": {
+            "exclude_files": exclude or [],
+            "excluded_fingerprints": len(exclude_fps),
+            "duplicates_skipped": n_dup_skipped,
+        },
         "timing": {"simulation_seconds": round(t_sim, 1)},
         "validity_filters": {
             "stability_margin_cal": [cfg.STABILITY_MARGIN_MIN_CAL, cfg.STABILITY_MARGIN_MAX_CAL],
@@ -568,6 +639,9 @@ def main():
     parser.add_argument("--oversample", type=float, default=5.0)
     parser.add_argument("--monitor-interval", type=float, default=5.0)
     parser.add_argument("--flush-every", type=int, default=100)
+    parser.add_argument("--exclude", nargs="+", default=None,
+                        help="prior dataset JSONL file(s) whose designs to skip "
+                             "(prevents cross-run duplicates)")
     args = parser.parse_args()
 
     _seed = args.seed
@@ -582,6 +656,7 @@ def main():
         oversample_factor=args.oversample,
         monitor_interval=args.monitor_interval,
         flush_every=args.flush_every,
+        exclude=args.exclude,
     )
 
 
