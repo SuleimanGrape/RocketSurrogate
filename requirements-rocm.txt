@@ -1,8 +1,18 @@
-# ── Core (install FIRST with ROCm index) ─────────────────────────────────────
-# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.1
+# ── Core: ROCm-compatible PyTorch (install FIRST, on the AMD/ROCm machine) ────
+# Latest ROCm build on the PyTorch index is torch 2.9.1 + rocm6.4 (verified
+# 2026-06-18); wheels exist for CPython 3.10–3.14. Install with:
 #
-# For NVIDIA CUDA instead:
-# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+#   pip install torch==2.9.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.4
+#
+# rocm6.3 carries the same 2.9.1 if your ROCm runtime is 6.3:
+#   pip install torch==2.9.1 ... --index-url https://download.pytorch.org/whl/rocm6.3
+#
+# NOTE: ROCm wheels are Linux-only — there is no native-Windows ROCm PyTorch.
+# Run training on the Linux/ROCm box (or WSL2 with a ROCm-supported AMD GPU).
+#
+# For NVIDIA instead: use a CUDA wheel. Blackwell cards (RTX 50xx, sm_120) need
+# cu128 or newer — cu124 will NOT support them:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 # ── Data & ML ────────────────────────────────────────────────────────────────
 numpy>=1.26

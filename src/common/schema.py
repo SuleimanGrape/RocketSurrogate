@@ -71,8 +71,9 @@ XGB_CATEGORICAL_COLS = {"nose_type", "motor_class"}
 
 # ── Outputs ────────────────────────────────────────────────────────────────────
 # Numeric regression targets, in outputs.extract_output() order. Note: the sim
-# terminates at apogee, so there is no landing_velocity_mps. time_to_apogee_s IS
-# produced and belongs here.
+# terminates at apogee, so there is no landing_velocity_mps, and flight_time_s
+# would be identical to time_to_apogee_s (flight ends at apogee) — so only
+# time_to_apogee_s is kept as a target.
 TARGETS = [
     "apogee_m",
     "max_velocity_mps",
@@ -80,7 +81,6 @@ TARGETS = [
     "max_acceleration_mps2",
     "burnout_altitude_m",
     "burnout_velocity_mps",
-    "flight_time_s",
     "time_to_apogee_s",
     "stability_margin_calibers",
     "rail_exit_velocity_mps",
@@ -108,7 +108,7 @@ PLOT_INPUT_KEYS = [
 ]
 PLOT_OUTPUT_KEYS = [
     "apogee_m", "max_velocity_mps", "max_mach", "max_acceleration_mps2",
-    "burnout_altitude_m", "flight_time_s",
+    "burnout_altitude_m", "time_to_apogee_s",
     "stability_margin_calibers", "rail_exit_velocity_mps",
     "max_dynamic_pressure_pa",
 ]

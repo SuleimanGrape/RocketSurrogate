@@ -50,6 +50,8 @@ def parse_args():
                    help="Enable mixed precision (recommended for ROCm GPU training)")
     p.add_argument("--num-workers", type=int, default=0,
                    help="DataLoader workers (set > 0 when training on GPU)")
+    p.add_argument("--no-engineer", action="store_true",
+                   help="Disable engineered features (Barrowman etc.); use raw inputs only")
     return p.parse_args()
 
 
@@ -59,9 +61,11 @@ def main():
 
     # ── Load data ──────────────────────────────────────────────────────
     print(f"Loading data from {args.data} ...")
-    dataset = RocketDataset.from_jsonl(args.data)
-    print(f"  {len(dataset)} samples loaded")
-    print(f"  Continuous features : {len(CONTINUOUS_FEATURES)}")
+    dataset = RocketDataset.from_jsonl(args.data, engineer_features=not args.no_engineer)
+    n_base = len(CONTINUOUS_FEATURES)
+    n_cont = len(dataset.continuous_names)
+    print(f"  {len(dataset)} computable samples loaded (negatives dropped)")
+    print(f"  Continuous features : {n_cont} ({n_base} base + {n_cont - n_base} engineered)")
     print(f"  Categorical features: {len(CATEGORICAL_FEATURES)}")
     print(f"  Targets             : {len(TARGETS)}")
 
@@ -80,7 +84,7 @@ def main():
     # ── Build model ───────────────────────────────────────────────────
     hidden_dims = [int(x) for x in args.hidden_dims.split(",")]
     model_kwargs = {
-        "continuous_dim": len(CONTINUOUS_FEATURES),
+        "continuous_dim": len(dataset.continuous_names),
         "categorical_cardinalities": CATEGORICAL_CARDINALITIES,
         "embedding_dim": args.embedding_dim,
         "output_dim": len(TARGETS),
@@ -123,10 +127,19 @@ def main():
     for k, v in results.items():
         print(f"  {k}: {v:.6f}")
 
-    # Save results + scalers
+    # Save results + scalers + feature/target layout (needed to reproduce the
+    # engineered continuous columns at inference time, in order).
     ckpt_path = Path(args.ckpt_dir)
     with open(ckpt_path / "test_results.json", "w") as f:
         json.dump(results, f, indent=2)
+    with open(ckpt_path / "feature_config.json", "w") as f:
+        json.dump({
+            "continuous_features": dataset.continuous_names,
+            "categorical_features": list(CATEGORICAL_FEATURES),
+            "targets": list(TARGETS),
+            "engineered": not args.no_engineer,
+            "model": args.model,
+        }, f, indent=2)
     loaders["input_scaler"].save(str(ckpt_path / "input_scaler.joblib"))
     loaders["target_scaler"].save(str(ckpt_path / "target_scaler.joblib"))
 

@@ -47,9 +47,8 @@ def extract_output(params: dict, flight: rocketpy.Flight) -> dict:
         apex_idx = np.argmax(traj_altitudes)
         time_to_apogee = float(traj_times[apex_idx])
 
-    # Flight time: last time in trajectory
-    # Note: with terminate_on_apogee=True, this is time-to-apogee, not full flight
-    t_flight = float(traj_times[-1]) if len(traj_times) > 0 else 0.0
+    # Note: there is no separate flight_time_s — with terminate_on_apogee=True the
+    # flight ends at apogee, so it would be identical to time_to_apogee_s.
 
     return {
         "apogee_m": round(apogee_m, 1),
@@ -58,7 +57,6 @@ def extract_output(params: dict, flight: rocketpy.Flight) -> dict:
         "max_acceleration_mps2": _safe(lambda: flight.max_acceleration),
         "burnout_altitude_m": round(burnout_alt, 1),
         "burnout_velocity_mps": round(burnout_vel, 1),
-        "flight_time_s": round(t_flight, 1),
         "time_to_apogee_s": round(time_to_apogee, 1),
         "stability_margin_calibers": round(sm, 2),
         "rail_exit_velocity_mps": _safe(lambda: flight.out_of_rail_velocity) if hasattr(flight, 'out_of_rail_velocity') else 0.0,

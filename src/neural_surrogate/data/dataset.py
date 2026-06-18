@@ -12,8 +12,12 @@ import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 from typing import Tuple, Optional, Dict, List
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "common"))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "..", "..", "common"))
+sys.path.insert(0, os.path.join(_HERE, "..", "..", "rocket_sim"))
+sys.path.insert(0, os.path.join(_HERE, "..", "..", "gbt"))
 from dataio import load_jsonl  # noqa: F401  (re-exported for callers)
+import schema  # noqa: E402
 
 from models.scalers import StandardScaler
 from models.surrogate import (
@@ -24,17 +28,48 @@ from models.surrogate import (
 )
 
 
+def _is_positive(rec: Dict) -> bool:
+    """A within-bounds (computable) record. Negatives carry within_bounds=False
+    and no numeric targets; legacy records without the field are positive.
+    Mirrors gbt/data_loader.py so both trainers filter identically."""
+    return rec.get("output", {}).get("within_bounds") is not False
+
+
+def engineered_continuous(records: List[Dict]) -> Tuple[np.ndarray, List[str]]:
+    """Compute the SAME engineered continuous features the XGBoost trees use
+    (total mass, ratios, Barrowman cg/cp/stability margin, ...) so the two model
+    families train on identical information. Reuses gbt/preprocess as the single
+    source of truth — never re-derives the formulas here.
+
+    Returns (array of shape (n, n_engineered) float32, engineered feature names).
+    """
+    import pandas as pd
+    from preprocess import add_engineered_features  # gbt — on sys.path above
+
+    raw = pd.DataFrame([r["input"] for r in records])[schema.INPUT_FIELDS]
+    full, names = add_engineered_features(raw, list(schema.INPUT_FIELDS))
+    new_names = names[len(schema.INPUT_FIELDS):]
+    return full[new_names].to_numpy(dtype=np.float32), new_names
+
+
 def records_to_arrays(
     records: List[Dict],
     continuous_keys: List[str] = CONTINUOUS_FEATURES,
     categorical_keys: List[str] = CATEGORICAL_FEATURES,
     target_keys: List[str] = TARGETS,
     encoding_maps: Dict = ENCODING_MAPS,
+    positive_only: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Convert JSONL records to (continuous, categorical, targets) arrays.
 
-    Each record is expected to have top-level "input" and "output" keys.
+    Each record is expected to have top-level "input" and "output" keys. By
+    default, not-computable (within_bounds=False) records are dropped first —
+    they carry no numeric targets, so feeding them to the regressor would KeyError
+    (and they aren't regression data). Pass positive_only=False only if the caller
+    has already filtered.
     """
+    if positive_only:
+        records = [r for r in records if _is_positive(r)]
     n = len(records)
     cont = np.zeros((n, len(continuous_keys)), dtype=np.float32)
     cat = np.zeros((n, len(categorical_keys)), dtype=np.int64)
@@ -93,11 +128,17 @@ class RocketDataset(Dataset):
         continuous: np.ndarray,
         categorical: np.ndarray,
         targets: np.ndarray,
+        continuous_names: Optional[List[str]] = None,
     ):
         assert len(continuous) == len(categorical) == len(targets)
         self.continuous = continuous.astype(np.float32)
         self.categorical = categorical.astype(np.int64)
         self.targets = targets.astype(np.float32)
+        # Names of the continuous columns (base + any engineered). The trainer
+        # reads len(continuous_names) to size the model's continuous input.
+        self.continuous_names = (
+            list(continuous_names) if continuous_names is not None
+            else list(CONTINUOUS_FEATURES))
 
     def __len__(self) -> int:
         return len(self.targets)
@@ -120,11 +161,25 @@ class RocketDataset(Dataset):
         categorical_keys=CATEGORICAL_FEATURES,
         target_keys=TARGETS,
         encoding_maps=ENCODING_MAPS,
+        engineer_features: bool = True,
     ) -> "RocketDataset":
-        """Load a JSONL file produced by the generator into a RocketDataset."""
-        records = load_jsonl(path)
-        cont, cat, tgt = records_to_arrays(records, continuous_keys, categorical_keys, target_keys, encoding_maps)
-        return RocketDataset(cont, cat, tgt)
+        """Load a JSONL file produced by the generator into a RocketDataset.
+
+        Not-computable (within_bounds=False) records are dropped. When
+        engineer_features is True (default) the same engineered continuous
+        features the XGBoost trees use are appended, for an apples-to-apples
+        comparison and to give the NN the Barrowman stability signal.
+        """
+        records = [r for r in load_jsonl(path) if _is_positive(r)]
+        cont, cat, tgt = records_to_arrays(
+            records, continuous_keys, categorical_keys, target_keys,
+            encoding_maps, positive_only=False)
+        cont_names = list(continuous_keys)
+        if engineer_features:
+            eng, eng_names = engineered_continuous(records)
+            cont = np.hstack([cont, eng]).astype(np.float32)
+            cont_names = cont_names + eng_names
+        return RocketDataset(cont, cat, tgt, continuous_names=cont_names)
 
     @staticmethod
     def make_loaders(
