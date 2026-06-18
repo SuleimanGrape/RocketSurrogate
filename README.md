@@ -29,19 +29,22 @@ Closed-Loop Active Learning (co-evolution)
 ## Current Status
 
 **Implemented:**
-- RocketPy 6-DOF simulation pipeline with process-isolated workers (hard-kill timeouts, worker recycling) — survives long runs without OOM/hangs
+- RocketPy 6-DOF simulation pipeline with process-isolated workers (hard-kill timeouts, worker recycling) and **memory self-regulation** (per-worker RSS recycling + system-RAM backpressure) — survives long multi-day runs without OOM/hangs at 12–14 workers
 - Resilient generation runner with incremental JSONL flushing, resume-on-restart, and RSS health logging
 - Constrained parameter sampling (random, LHS, Sobol, balanced)
 - Two-stage validation (pre/post simulation) with a drag-aware performance gate that skips designs certain to bust the Mach/apogee caps before the expensive solve
+- **Feasibility (`within_bounds`) label** — every record is tagged computable/not-computable, and the generator captures the rejected (negative) class instead of discarding it, so the surrogate can learn what is *not* computable
 - JSONL dataset generation with metadata and distribution plots
 - Single-source-of-truth schema (`src/common/schema.py`) shared across simulation, XGBoost, and neural packages
-- Feature engineering (aspect ratio, thrust-to-weight, ballistic coefficient, fin loading, etc.)
-- XGBoost training pipeline with native categorical feature support
+- Feature engineering (aspect ratio, thrust-to-weight, ballistic coefficient, fin loading, and exact closed-form **Barrowman cg/cp/stability-margin** features shared by both model families)
+- **XGBoost surrogate** (12 numeric targets, native categorical support) trained on ~38.6k computable samples: test R² ≥ 0.996 on 11/12 targets (stability margin 0.999, cg/cp 1.000)
+- **`within_bounds` feasibility classifier** (XGBoost binary): test ROC-AUC ≈ 0.99, PR-AUC ≈ 0.99
+- Sample-complexity tooling: regression, classifier, and neural learning-curve studies (`learning_curve.py`, `classifier_curve.py`, `nn_learning_curve.py`)
 - Train/val/test splitting and evaluation with metrics tables
 
 **In Progress:**
-- Large-scale dataset generation (5,000-sample runs; scaling toward tens of thousands of samples)
-- Neural surrogate training and knowledge distillation
+- Large-scale dataset generation (consolidated corpus ~62k records = ~38.6k computable + ~23.5k not-computable; a 30,000-valid run is underway)
+- Neural surrogate training (pipeline rebuilt for feature parity with XGBoost; trains on the ROCm machine)
 - Closed-loop active learning loop implementation
 
 **Planned:**
@@ -52,7 +55,7 @@ Closed-Loop Active Learning (co-evolution)
 
 ## Computational Requirements
 
-RocketPy simulations take 0.1–60+ seconds per design depending on motor class and apogee. Generation runs with up to 12 process-isolated parallel workers on a 16-core CPU; a 5,000-sample run takes several hours. The resilient runner (`run_with_monitor.py`) flushes incrementally and resumes after interruption, so large runs scaling to tens of thousands of samples can proceed in stages. Neural surrogate training requires a GPU (AMD with ROCm or CUDA). LLM fine-tuning targets a single AMD GPU with a $100 cloud budget.
+RocketPy simulations take 0.1–60+ seconds per design depending on motor class and apogee. Generation runs with up to 14 process-isolated parallel workers on a 16-core CPU; the self-regulating pool recycles workers on RSS growth and throttles dispatch under system-RAM pressure, so worker count is a throughput knob rather than a safety knob. The resilient runner (`run_with_monitor.py`) flushes incrementally and resumes after interruption, so large runs scaling to tens of thousands of samples can proceed in stages. Neural surrogate training requires a GPU — install ROCm-compatible PyTorch from `requirements-rocm.txt` (latest is torch 2.9.1 + rocm6.4, Linux-only) on an AMD machine, or a CUDA wheel (cu128+ for Blackwell) on NVIDIA. LLM fine-tuning targets a single AMD GPU with a $100 cloud budget.
 
 ## Quick Start
 
@@ -64,28 +67,50 @@ pip install -r requirements.txt
 
 ### Generate Synthetic Data
 
-Resilient runner (recommended for large runs — incremental flush, resume, health logging):
+Resilient runner (recommended for large runs — incremental flush, resume, health logging). It captures both the computable (`within_bounds=true`) and rejected (`within_bounds=false`) classes; `--exclude` de-duplicates against prior runs:
 
 ```bash
-python run_with_monitor.py --count 5000 --workers 12 --seed 2026 --output outputs/rocket_data.jsonl
+python run_with_monitor.py --count 30000 --workers 14 --seed 2030 \
+    --output outputs/rocket_data_30k_s2030.jsonl \
+    --exclude outputs/rocket_data_full.jsonl
 ```
 
-Or the bare generator for quick runs:
+Or the bare generator for quick runs (positives only):
 
 ```bash
 python -m src.rocket_sim.generator --count 2000 --method random --workers 6 --oversample 3.0 --output outputs/rocket_data.jsonl
 ```
 
-### Train XGBoost Surrogate
+### Consolidate Runs
+
+Merge multiple runs into one deduplicated corpus (exact + near-duplicate passes):
 
 ```bash
-python -m src.gbt.train --data outputs/rocket_data.jsonl --no-tune
+python consolidate_dataset.py --inputs outputs/run_a.jsonl outputs/run_b.jsonl \
+    --output outputs/rocket_data_full.jsonl --near-dist 0
 ```
 
-### Train Neural Surrogate
+### Train XGBoost Surrogate + Feasibility Classifier
 
 ```bash
-python -m src.neural_surrogate.train_surrogate
+python src/gbt/train.py --data outputs/rocket_data_full.jsonl --no-tune \
+    --output-dir models/surrogate --plots-dir plots/surrogate
+python src/gbt/train_classifier.py --data outputs/rocket_data_full.jsonl \
+    --output-dir models/classifier --plots-dir plots/classifier
+```
+
+### Train Neural Surrogate (on the ROCm/CUDA machine)
+
+```bash
+python src/neural_surrogate/train_surrogate.py --data outputs/rocket_data_full.jsonl --model mlp --device auto
+```
+
+### Sample-Complexity Studies
+
+```bash
+python learning_curve.py  --inputs outputs/rocket_data_full.jsonl --out-dir outputs/learning_curve
+python classifier_curve.py --inputs outputs/rocket_data_full.jsonl --out-dir outputs/classifier_curve
+python nn_learning_curve.py --data outputs/rocket_data_full.jsonl --device auto
 ```
 
 ### Run Timing Benchmark
@@ -101,11 +126,17 @@ RocketSurrogate/
 ├── README.md                     # This file
 ├── ROCKET.md                     # Detailed technical documentation
 ├── requirements.txt
-├── run_with_monitor.py           # Resilient generation runner (flush/resume/health log)
+├── run_with_monitor.py           # Resilient generation runner (flush/resume/health log, captures within_bounds=false)
 ├── run_generation.ps1            # Convenience launcher for run_with_monitor.py
 ├── run_ten_rockets.py            # Timing benchmark
 ├── run_sim_and_train.py          # End-to-end simulation → training
+├── consolidate_dataset.py        # Merge + dedup multiple runs into one corpus
+├── backfill_within_bounds.py     # Stamp within_bounds=true on legacy data files
+├── learning_curve.py             # XGBoost regression accuracy vs sample count
+├── classifier_curve.py           # within_bounds classifier accuracy vs sample count
+├── nn_learning_curve.py          # Neural surrogate accuracy vs sample count (+XGB overlay)
 ├── analyze_health.py             # Inspect RSS/health logs from a run
+├── diagnose.py                   # Run/data diagnostics
 ├── bench_compare.py              # Benchmark comparison
 ├── bench_memory.py               # Memory benchmark
 ├── src/
@@ -126,25 +157,33 @@ RocketSurrogate/
 │   │   ├── splitter.py           # Train/val/test splitting
 │   │   └── plotter.py            # Distribution plots
 │   ├── gbt/                      # XGBoost surrogate models
-│   │   ├── data_loader.py        # JSONL loading with categorical DataFrames
-│   │   ├── preprocess.py         # Feature engineering + scaling
+│   │   ├── data_loader.py        # JSONL loading (label-aware: regression vs classification)
+│   │   ├── preprocess.py         # Feature engineering (incl. Barrowman) + scaling
 │   │   ├── synthetic_data.py     # Synthetic corpus generation via gen_worker
 │   │   ├── model.py              # XGBoost training (categorical support)
 │   │   ├── evaluate.py           # Metrics, plots, feature importance
-│   │   └── train.py              # Main training entry point
+│   │   ├── train.py              # Regression surrogate entry point (one model per target)
+│   │   └── train_classifier.py   # within_bounds feasibility classifier entry point
 │   └── neural_surrogate/         # Neural network surrogate + LLM distillation
+│       ├── data/dataset.py       # Label-aware loading + engineered-feature parity with gbt
+│       ├── models/surrogate.py   # MLP / ResMLP / Feature-Transformer
+│       ├── training/trainer.py   # Training loop (CUDA/ROCm auto-device)
+│       └── train_surrogate.py    # Neural surrogate entry point
 ├── tests/
 │   ├── test_schema.py            # Schema consistency checks
 │   └── debug_params.py
 ├── models/                       # Trained models (gitignored)
+├── plots/                        # Evaluation plots (gitignored)
 ├── outputs/                      # Generated data (gitignored)
+├── requirements.txt              # Core deps
+├── requirements-rocm.txt         # ROCm/CUDA PyTorch + LLM deps
 └── docs/
     └── paper/                    # Research paper drafts and assets
 ```
 
 ## Data Format
 
-JSONL (JSON Lines), one record per line. Each record has `input` (21 design parameters) and `output` (13 flight metrics). The schema is defined once in `src/common/schema.py` and consumed by every package. See [ROCKET.md](ROCKET.md) for the full schema.
+JSONL (JSON Lines), one record per line. Each record has `input` (21 design parameters) and `output`. Computable designs carry 12 numeric flight metrics plus `within_bounds: true`; not-computable designs carry only `within_bounds: false` (no numeric targets). The schema is defined once in `src/common/schema.py` and consumed by every package. See [ROCKET.md](ROCKET.md) for the full schema.
 
 ## Key Design Principles
 
@@ -153,9 +192,11 @@ JSONL (JSON Lines), one record per line. Each record has `input` (21 design para
 3. **Mass-ratio constraints** — Body length is bounded per (diameter, motor) to ensure realistic mass ratios.
 4. **Stability-constrained fin geometry** — Barrowman equations determine valid fin span ranges during sampling (0.5–4.0 caliber stability margin).
 5. **Cheap performance gate before simulation** — A closed-form drag-aware boost+coast estimate rejects designs whose predicted Mach/apogee clearly exceed the caps, removing the dominant source of wasted simulations. Thresholds are calibrated against real outcomes for zero false-rejections (verified 0/5000 on the seed-2026 run).
-6. **Process isolation over in-process timeouts** — Each simulation runs in a separate worker process with a hard-kill timeout and periodic worker recycling, so a hung or memory-leaking sim cannot stall or OOM the whole run.
-7. **Single source of truth for the schema** — `src/common/schema.py` defines all input/target fields and encodings once; the simulator, XGBoost, and neural packages import it rather than redefining their own.
-8. **Closed-loop co-evolution** — The LLM proposer and neural surrogate evaluator improve together through iterative active learning.
+6. **Process isolation + memory self-regulation** — Each simulation runs in a separate worker with a hard-kill timeout; the pool also recycles workers on RSS growth and throttles dispatch under system-RAM pressure, so a leaking sim cannot stall or OOM a multi-day run.
+7. **Capture the negative class** — Rejected designs are saved as `within_bounds=false` rather than discarded, so a feasibility classifier can tell the downstream LLM which designs are not computable.
+8. **Single source of truth for the schema** — `src/common/schema.py` defines all input/target fields and encodings once; the simulator, XGBoost, and neural packages import it rather than redefining their own.
+9. **Feature parity across model families** — XGBoost and the neural surrogate share the same engineered features (incl. closed-form Barrowman cg/cp/stability), so accuracy comparisons isolate the model, not the inputs.
+10. **Closed-loop co-evolution** — The LLM proposer and neural surrogate evaluator improve together through iterative active learning.
 
 ## Documentation
 

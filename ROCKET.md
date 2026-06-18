@@ -35,6 +35,8 @@ The data generation pipeline has five stages:
 Sample → Pre-validate → Simulate → Post-validate → Save
 ```
 
+Designs that fail pre-validation, time out, or fail post-validation are **not discarded** — the resilient runner (`run_with_monitor.py`) saves them as `within_bounds=false` records (input only, no numeric targets). Computable designs are saved as `within_bounds=true` with their full flight metrics. This yields a labelled feasibility dataset (the negative class) alongside the regression corpus. On recent balanced runs ~30% of attempted designs end up computable.
+
 ### 1. Parameter Sampling (`parameters.py`)
 
 Three sampling strategies: random, Latin Hypercube (LHS) [McKay 1979], and Sobol sequence. A `balanced_sample()` variant ensures equal representation of discrete categories across all combinations of diameter, nose type, fin count, and motor class.
@@ -74,27 +76,30 @@ Filters simulation outputs for physical plausibility:
 
 ### 5. Output (`outputs.py`, `splitter.py`, `plotter.py`)
 
-- JSONL serialisation (one record per line)
-- Metadata recording (random seed, timing statistics, acceptance rates per stage)
+- JSONL serialisation (one record per line), each tagged with the `within_bounds` computability label
+- Metadata recording (random seed, timing statistics, acceptance rates per stage, `within_bounds` true/false counts)
 - Train/val/test splits (70/15/15, stratified)
 - Summary distribution plots (histograms, pairwise scatter matrices)
 
 ## Current Status
 
 **Implemented:**
-- RocketPy 6-DOF simulation pipeline with timeout protection
+- RocketPy 6-DOF simulation pipeline with timeout protection, process isolation, and memory self-regulation (RSS recycling + RAM backpressure)
 - Constrained parameter sampling (random, LHS, Sobol, balanced)
-- Two-stage validation achieving ~94% pre-validation pass rate
-- JSONL dataset generation with metadata and distribution plots
+- Two-stage validation, with the rejected (negative) class captured as `within_bounds=false`
+- JSONL dataset generation with metadata, `within_bounds` labels, and distribution plots
 - Burnout altitude/velocity extraction via flight.solution ODE trajectory
 - XGBoost training pipeline with native categorical feature support and random search tuning
-- Feature engineering: aspect ratio, motor impulse, T/W ratio, fin area ratio, nose-body ratio, slenderness, ballistic coefficient, fin loading
+- Feature engineering: aspect ratio, motor impulse, T/W ratio, fin area ratio, nose-body ratio, slenderness, ballistic coefficient, fin loading, and exact closed-form Barrowman cg/cp/stability-margin features
+- XGBoost regression surrogate (12 targets) trained on ~38.6k samples — test R² ≥ 0.996 on 11/12 targets (stability margin 0.999, cg/cp 1.000; `max_acceleration_mps2` ≈ 0.76, a heavy-tail plateau)
+- `within_bounds` feasibility classifier (XGBoost binary) — test ROC-AUC ≈ 0.99, PR-AUC ≈ 0.99
+- Sample-complexity studies for regression, classifier, and neural surrogate
 - Timing benchmark suite
 - Research paper draft and formatted .docx
 
 **In Progress:**
-- 2000-sample balanced dataset generation (6 workers, ~2–3 hours)
-- Neural surrogate training (MLP, Residual MLP, Feature Transformer)
+- Large-scale dataset generation (consolidated ~62k records; a 30,000-valid run underway)
+- Neural surrogate training (MLP, Residual MLP, Feature Transformer; pipeline rebuilt for feature parity, trains on the ROCm machine)
 - Closed-loop active learning loop implementation
 
 **Planned:**
@@ -154,16 +159,22 @@ Records are stored as JSONL, one per line:
     "max_acceleration_mps2": 124.0,
     "burnout_altitude_m": 682.0,
     "burnout_velocity_mps": 185.0,
-    "flight_time_s": 196.0,
     "time_to_apogee_s": 18.0,
     "stability_margin_calibers": 1.80,
     "rail_exit_velocity_mps": 22.5,
     "max_dynamic_pressure_pa": 45000.0,
     "cg_m": 1.4500,
     "cp_m": 1.5500,
-    "motor_class": "J"
+    "motor_class": "J",
+    "within_bounds": true
   }
 }
+```
+
+A not-computable design carries only the label and no numeric targets:
+
+```json
+{ "input": { "...": "..." }, "output": { "within_bounds": false } }
 ```
 
 ## Input Parameters
@@ -209,7 +220,6 @@ Records are stored as JSONL, one per line:
 | `max_acceleration_mps2` | Maximum acceleration | m/s² |
 | `burnout_altitude_m` | Altitude at motor burnout | m |
 | `burnout_velocity_mps` | Velocity at motor burnout | m/s |
-| `flight_time_s` | Flight time to apogee (sim terminates at apogee) | s |
 | `time_to_apogee_s` | Time from launch to apogee | s |
 | `stability_margin_calibers` | Static margin (CP – CG) / diameter | calibers |
 | `rail_exit_velocity_mps` | Speed at end of launch rail | m/s |
@@ -217,10 +227,16 @@ Records are stored as JSONL, one per line:
 | `cg_m` | Center of gravity from nose tip | m |
 | `cp_m` | Center of pressure from nose tip (Barrowman) | m |
 
+These 12 metrics are the regression targets. In addition, every record carries a
+`within_bounds` boolean (the binary classification label) and a `motor_class`
+passthrough echo.
+
 > The canonical input/output field lists and categorical encodings live in
 > `src/common/schema.py` (the single source of truth, verified by
 > `tests/test_schema.py`). The simulation terminates at apogee, so there is no
-> `landing_velocity_mps`. `time_to_apogee_s` is produced but not yet modelled.
+> `landing_velocity_mps`, and `flight_time_s` was dropped because it is identical
+> to `time_to_apogee_s` (the flight ends at apogee). `time_to_apogee_s` is a
+> modelled target.
 
 ## Motor Specifications
 
@@ -270,22 +286,40 @@ Expected results from the paper: the active loop achieves ~41% higher apogee tha
 
 ### Generate Data
 
+Resilient runner (recommended — incremental flush, resume, health log, and it captures the `within_bounds=false` negative class):
+
+```bash
+python run_with_monitor.py --count 30000 --workers 14 --seed 2030 \
+    --output outputs/rocket_data_30k_s2030.jsonl --exclude outputs/rocket_data_full.jsonl
+```
+
+Bare generator (positives only) and its options:
+
 ```bash
 python -m src.rocket_sim.generator --count 2000 --method random --workers 6 --output outputs/rocket_data.jsonl
 ```
 
-Options:
 - `--method {random,lhs,sobol}` — sampling strategy
 - `--no-balanced` — disable balanced category sampling
-- `--workers N` — parallel simulation workers (default: 6)
-- `--oversample F` — oversample factor for rejections (default: 3.0)
-- `--splits-dir DIR` — output directory for train/val/test splits
-- `--plots-dir DIR` — output directory for summary plots
+- `--workers N` — parallel simulation workers
+- `--oversample F` — oversample factor for rejections
+- `--splits-dir DIR` / `--plots-dir DIR` — output directories for splits / plots
+- `--exclude FILES` — de-duplicate inputs against prior runs (run_with_monitor.py)
 
-### Train XGBoost Surrogate
+### Train Surrogates
 
 ```bash
-python -m src.gbt.train --data outputs/rocket_data.jsonl --no-tune
+python src/gbt/train.py --data outputs/rocket_data_full.jsonl --no-tune    # 12-target regression
+python src/gbt/train_classifier.py --data outputs/rocket_data_full.jsonl   # within_bounds feasibility
+python src/neural_surrogate/train_surrogate.py --data outputs/rocket_data_full.jsonl --device auto
+```
+
+### Sample-Complexity Studies
+
+```bash
+python learning_curve.py   --inputs outputs/rocket_data_full.jsonl   # regression R² vs N
+python classifier_curve.py --inputs outputs/rocket_data_full.jsonl   # classifier AUC vs N
+python nn_learning_curve.py --data   outputs/rocket_data_full.jsonl   # neural R² vs N
 ```
 
 ### Run Timing Benchmark
@@ -320,7 +354,12 @@ RocketSurrogate/
 ├── requirements.txt
 ├── run_ten_rockets.py            # Timing benchmark script
 ├── run_generation.ps1            # Data-generation launcher (PowerShell)
-├── run_with_monitor.py           # Resilient generator: health log + resume
+├── run_with_monitor.py           # Resilient generator: health log + resume + negative-class capture
+├── consolidate_dataset.py        # Merge + dedup runs into one corpus
+├── backfill_within_bounds.py     # Stamp within_bounds=true on legacy data
+├── learning_curve.py             # XGBoost regression accuracy vs N
+├── classifier_curve.py           # within_bounds classifier accuracy vs N
+├── nn_learning_curve.py          # Neural surrogate accuracy vs N
 ├── bench_memory.py               # Memory-leak before/after benchmark
 ├── src/
 │   ├── common/                   # Shared, dependency-light modules
@@ -340,17 +379,21 @@ RocketSurrogate/
 │   │   ├── splitter.py           # Train/val/test splits
 │   │   └── plotter.py            # Distribution plots
 │   ├── gbt/                      # XGBoost surrogate models
-│   │   ├── data_loader.py        # JSONL loading
-│   │   ├── preprocess.py         # Feature engineering
+│   │   ├── data_loader.py        # JSONL loading (label-aware: regression / classification)
+│   │   ├── preprocess.py         # Feature engineering (incl. Barrowman)
 │   │   ├── synthetic_data.py     # Generation wrapper for training
 │   │   ├── model.py              # XGBoost training
 │   │   ├── evaluate.py           # Metrics, plots
-│   │   └── train.py              # Entry point
-│   └── neural_surrogate/         # Neural network surrogate models
+│   │   ├── train.py              # Regression surrogate entry point
+│   │   └── train_classifier.py   # within_bounds feasibility classifier entry point
+│   └── neural_surrogate/         # Neural network surrogate models (label-aware + feature parity)
 ├── tests/
+│   ├── test_schema.py            # Schema consistency checks
 │   └── debug_params.py
 ├── models/                       # Trained models (gitignored)
+├── plots/                        # Evaluation plots (gitignored)
 ├── outputs/                      # Generated data (gitignored)
+├── requirements-rocm.txt         # ROCm/CUDA PyTorch + LLM deps
 └── docs/
     └── paper/                    # Research paper drafts and assets
         ├── paper-full-draft.txt
@@ -365,10 +408,12 @@ RocketSurrogate/
 2. **Motor-to-diameter matching** — Impossible motor/body combinations are excluded at the sampling stage.
 3. **Mass-ratio constraints** — Body length bounded per (diameter, motor) to ensure dry_mass / propellant_mass ∈ [1.5, 10.0].
 4. **Stability-constrained fin geometry** — Barrowman equations determine valid fin span ranges during sampling (0.5–4.0 cal).
-5. **Simulation timeout is mandatory** — 60-second threading-based limit prevents hangs.
-6. **Burnout extraction from ODE trajectory** — Uses flight.solution arrays (t, y) rather than RocketPy's unreliable `.burn_out_altitude` API.
-7. **Feature engineering** — Domain-specific features (ballistic coefficient, fin loading, aspect ratio, T/W) improve surrogate generalisation.
-8. **Closed-loop co-evolution** — The LLM proposer and neural surrogate evaluator improve together through iterative active learning, outperforming static pipelines.
+5. **Process isolation + memory self-regulation** — Each sim runs in a worker with a hard-kill timeout; the pool recycles workers on RSS growth and throttles under RAM pressure, so leaks/hangs cannot crash multi-day runs.
+6. **Capture the negative class** — Rejected designs are saved as `within_bounds=false` so a feasibility classifier can flag designs that are not computable.
+7. **Burnout extraction from ODE trajectory** — Uses flight.solution arrays (t, y) rather than RocketPy's unreliable `.burn_out_altitude` API.
+8. **Feature engineering with parity** — Domain features (ballistic coefficient, fin loading, aspect ratio, T/W) plus exact closed-form Barrowman cg/cp/stability; XGBoost and the neural surrogate share the same feature set.
+9. **Single source of truth for the schema** — `src/common/schema.py` defines all fields/encodings once; every package imports it.
+10. **Closed-loop co-evolution** — The LLM proposer and neural surrogate evaluator improve together through iterative active learning, outperforming static pipelines.
 
 ## License
 
