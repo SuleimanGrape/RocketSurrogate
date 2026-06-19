@@ -24,7 +24,18 @@ from models.surrogate import (
 )
 from data.dataset import RocketDataset
 from training.trainer import Trainer
-from utils.helpers import set_seed
+
+# `from utils.helpers import set_seed` is unsafe here: importing data.dataset above
+# puts rocket_sim/ on sys.path, whose utils.py then shadows the neural_surrogate
+# `utils` package (and importing ours first would poison the bare `utils` name for
+# preprocess's `from utils import compute_cp_barrowman`). Load helpers by file path
+# under a unique module name to sidestep the collision entirely.
+import importlib.util as _ilu
+_spec = _ilu.spec_from_file_location(
+    "ns_helpers", str(Path(__file__).resolve().parent / "utils" / "helpers.py"))
+_ns = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_ns)
+set_seed = _ns.set_seed
 
 
 def parse_args():
@@ -39,6 +50,9 @@ def parse_args():
     p.add_argument("--scheduler", type=str, default="cosine", choices=["cosine", "plateau", "none"])
     p.add_argument("--patience", type=int, default=30)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--train-frac", type=float, default=0.8)
+    p.add_argument("--val-frac", type=float, default=0.1)
+    p.add_argument("--test-frac", type=float, default=0.1)
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--ckpt-dir", type=str, default="checkpoints")
     p.add_argument("--hidden-dims", type=str, default="256,512,512,256,128",
@@ -68,10 +82,15 @@ def main():
     print(f"  Continuous features : {n_cont} ({n_base} base + {n_cont - n_base} engineered)")
     print(f"  Categorical features: {len(CATEGORICAL_FEATURES)}")
     print(f"  Targets             : {len(TARGETS)}")
+    if dataset.log1p_indices:
+        print(f"  log1p targets       : {[TARGETS[i] for i in dataset.log1p_indices]}")
 
     # ── Split + scale + DataLoaders ───────────────────────────────────
     loaders = RocketDataset.make_loaders(
         dataset,
+        train_frac=args.train_frac,
+        val_frac=args.val_frac,
+        test_frac=args.test_frac,
         batch_size=args.batch_size,
         scale_inputs=True,
         scale_targets=True,
@@ -123,7 +142,7 @@ def main():
 
     # ── Final test evaluation ─────────────────────────────────────────
     print("\n=== Test Set Evaluation ===")
-    results = trainer.evaluate(loaders["test"], target_names=TARGETS)
+    results = trainer.evaluate(loaders["test"], target_names=TARGETS, log1p_indices=dataset.log1p_indices)
     for k, v in results.items():
         print(f"  {k}: {v:.6f}")
 

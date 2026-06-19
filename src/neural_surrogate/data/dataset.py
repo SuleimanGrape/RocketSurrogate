@@ -129,6 +129,7 @@ class RocketDataset(Dataset):
         categorical: np.ndarray,
         targets: np.ndarray,
         continuous_names: Optional[List[str]] = None,
+        log1p_indices: Optional[List[int]] = None,
     ):
         assert len(continuous) == len(categorical) == len(targets)
         self.continuous = continuous.astype(np.float32)
@@ -139,6 +140,9 @@ class RocketDataset(Dataset):
         self.continuous_names = (
             list(continuous_names) if continuous_names is not None
             else list(CONTINUOUS_FEATURES))
+        # Target column indices stored in log1p space (heavy-tailed targets).
+        # evaluate() applies expm1 to these before computing metrics.
+        self.log1p_indices = list(log1p_indices) if log1p_indices else []
 
     def __len__(self) -> int:
         return len(self.targets)
@@ -179,7 +183,15 @@ class RocketDataset(Dataset):
             eng, eng_names = engineered_continuous(records)
             cont = np.hstack([cont, eng]).astype(np.float32)
             cont_names = cont_names + eng_names
-        return RocketDataset(cont, cat, tgt, continuous_names=cont_names)
+        # Heavy-tailed targets are fit in log1p space (same gbt LOG1P_TARGETS set
+        # the trees use); evaluate() inverts them with expm1. Single source of
+        # truth, so the two model families treat the tail identically.
+        from model import LOG1P_TARGETS  # gbt (on sys.path above)
+        log1p_indices = [i for i, k in enumerate(target_keys) if k in LOG1P_TARGETS]
+        for i in log1p_indices:
+            tgt[:, i] = np.log1p(tgt[:, i])
+        return RocketDataset(cont, cat, tgt, continuous_names=cont_names,
+                             log1p_indices=log1p_indices)
 
     @staticmethod
     def make_loaders(

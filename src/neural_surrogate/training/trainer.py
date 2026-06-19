@@ -249,8 +249,14 @@ class Trainer:
         self,
         loader: DataLoader,
         target_names: Optional[List[str]] = None,
+        log1p_indices: Optional[List[int]] = None,
     ) -> Dict[str, float]:
-        """Return per-target MAE and overall metrics."""
+        """Return per-target MAE/R^2/MAPE in original units.
+
+        log1p_indices: target columns stored in log1p space by the dataset; they
+        are inverted with expm1 here (after the StandardScaler inverse) so every
+        metric is in the targets' natural units — mirrors gbt/evaluate.predict_all.
+        """
         self.model.eval()
         all_preds, all_targets = [], []
 
@@ -271,6 +277,11 @@ class Trainer:
             preds = self.output_scaler.inverse_transform(preds)
             targets = self.output_scaler.inverse_transform(targets)
 
+        # Invert log1p targets so every metric is in natural units.
+        for i in (log1p_indices or []):
+            preds[:, i] = np.expm1(preds[:, i])
+            targets[:, i] = np.expm1(targets[:, i])
+
         mae_per_target = np.mean(np.abs(preds - targets), axis=0)
         results = {"overall_mae": float(np.mean(mae_per_target))}
 
@@ -283,6 +294,14 @@ class Trainer:
         r2 = 1 - ss_res / np.maximum(ss_tot, 1e-8)
         for i, name in enumerate(target_names or range(len(r2))):
             results[f"r2_{name}"] = float(r2[i])
+
+        # MAPE per target (guard divide-by-~0; max_mach is unreliable here).
+        eps = 1e-6
+        for i, name in enumerate(target_names or range(targets.shape[1])):
+            m = np.abs(targets[:, i]) > eps
+            results[f"mape_{name}"] = (
+                float(np.mean(np.abs((targets[m, i] - preds[m, i]) / targets[m, i])) * 100)
+                if m.any() else float("nan"))
 
         return results
 
