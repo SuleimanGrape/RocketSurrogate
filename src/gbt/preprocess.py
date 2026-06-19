@@ -80,6 +80,17 @@ def add_engineered_features(
         df["tw_ratio_est"] = df["avg_thrust_N"] / (total_m * 9.81 + 1e-9)
         new_names.append("tw_ratio_est")
 
+    # Burnout acceleration proxy (m/s^2): analytic upper envelope of peak accel.
+    # Peak acceleration occurs near burnout, where the propellant is spent and the
+    # mass is ~dry_mass, so a ~ thrust/dry_mass - g. The heavy tail in
+    # max_acceleration_mps2 is driven by 1/dry_mass blowing up for light rockets;
+    # handing the model this quantity (in the target's own units) linearises that
+    # tail instead of forcing it to learn 1/m. tw_ratio_est above uses *total*
+    # (liftoff) mass, so this burnout-condition term is independent information.
+    if "avg_thrust_N" in df.columns and "dry_mass_kg" in df.columns:
+        df["burnout_accel_proxy_mps2"] = df["avg_thrust_N"] / (df["dry_mass_kg"] + 1e-9) - 9.80665
+        new_names.append("burnout_accel_proxy_mps2")
+
     # Fin area ratio
     if all(k in df.columns for k in ["fin_root_chord_m", "fin_tip_chord_m", "fin_span_m", "fin_count", "diameter_mm"]):
         if d_m is None:
