@@ -137,10 +137,18 @@ def main():
     X, feat_names = add_engineered_features(X, feat_names0)
     print(f"Features: {len(feat_names)}  Targets: {len(target_names)}")
 
+    # extract_arrays drops within_bounds=False records (no numeric targets), so
+    # the regression matrix may be smaller than the raw corpus -- split over the
+    # rows that actually survived, not len(recs).
+    n_rows = len(Y)
+    if n_rows < len(recs):
+        print(f"  ({len(recs) - n_rows} non-computable records excluded; "
+              f"{n_rows} positives used for regression)")
+
     # Fixed shuffle, then a fixed held-out test set used for every slice.
     rng = np.random.default_rng(args.seed)
-    perm = rng.permutation(len(recs))
-    n_test = int(len(recs) * args.test_frac)
+    perm = rng.permutation(n_rows)
+    n_test = int(n_rows * args.test_frac)
     test_idx, pool_idx = perm[:n_test], perm[n_test:]
     Xte = X.iloc[test_idx].reset_index(drop=True)
     Yte = Y[test_idx]
