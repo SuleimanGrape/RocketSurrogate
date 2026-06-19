@@ -220,7 +220,7 @@ def predict_on_new(models, feature_names, target_names, new_records):
     # Apply same preprocessing (feature engineering only, no scaling)
     X_new, _ = add_engineered_features(X_new, INPUT_FEATURES)
 
-    preds = predict_all(models, X_new, feature_names)
+    preds = predict_all(models, X_new, feature_names, target_names)
 
     print(f"\n{'=' * 60}")
     print("Predictions on New Simulations")

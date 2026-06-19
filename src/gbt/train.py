@@ -25,7 +25,7 @@ import numpy as np
 from synthetic_data import INPUT_FEATURES, TARGET_FEATURES, generate as generate_synthetic
 from data_loader import load_jsonl, extract_arrays, train_val_test_split
 from preprocess import preprocess
-from model import train_multi_target, save_models, BASE_PARAMS
+from model import train_multi_target, save_models, BASE_PARAMS, LOG1P_TARGETS
 from evaluate import (
     evaluate_all,
     predict_all,
@@ -164,7 +164,7 @@ def main():
 
         # Generate plots only on test set
         if split_name == "test":
-            preds = predict_all(models, X_split, feature_names_used)
+            preds = predict_all(models, X_split, feature_names_used, target_names)
             plot_predictions(Y_split, preds, target_names, args.plots_dir, split_name)
             plot_residuals(Y_split, preds, target_names, args.plots_dir, split_name)
             plot_feature_importance(models, target_names, feature_names_used, args.plots_dir)
@@ -186,6 +186,7 @@ def main():
             "feature_names": feature_names_used,
             "scale_features": args.scale_features,
             "engineer_features": args.engineer_features,
+            "log1p_targets": sorted(t for t in target_names if t in LOG1P_TARGETS),
         },
     )
 

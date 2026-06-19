@@ -9,6 +9,8 @@ matplotlib.use("Agg")  # non-interactive backend
 import matplotlib.pyplot as plt
 from typing import Dict, List, Optional, Tuple
 
+from model import LOG1P_TARGETS
+
 
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     """Compute regression metrics for a single target."""
@@ -26,10 +28,20 @@ def predict_all(
     models: List[xgb.Booster],
     X,
     feature_names: Optional[List[str]] = None,
+    target_names: Optional[List[str]] = None,
 ) -> np.ndarray:
-    """Run prediction for all target models. Returns (n_samples, n_targets)."""
+    """Run prediction for all target models. Returns (n_samples, n_targets).
+
+    Targets in LOG1P_TARGETS were fit on log1p(y); pass `target_names` so their
+    predictions are inverted (expm1) back to the original units here, the single
+    point every consumer routes through.
+    """
     dmatrix = xgb.DMatrix(X, feature_names=feature_names, enable_categorical=True)
     preds = np.column_stack([m.predict(dmatrix) for m in models])
+    if target_names is not None:
+        for i, name in enumerate(target_names):
+            if name in LOG1P_TARGETS:
+                preds[:, i] = np.expm1(preds[:, i])
     return preds
 
 
@@ -42,7 +54,7 @@ def evaluate_all(
     feature_names: Optional[List[str]] = None,
 ) -> Dict:
     """Evaluate all target models on a dataset. Returns per-target metrics."""
-    preds = predict_all(models, X, feature_names)
+    preds = predict_all(models, X, feature_names, target_names)
     results = {}
     print(f"\n{'='*60}")
     print(f"Evaluation on {split_name} set  ({X.shape[0]} samples)")

@@ -81,6 +81,22 @@ def pr_auc(y, p):
     return ap
 
 
+def threshold_for_fpr(y_val, p_val, target_fpr):
+    """Smallest decision threshold whose false-positive rate on the validation
+    negatives is <= target_fpr (maximizes recall subject to the FP budget).
+
+    A false positive here = predicting within_bounds=True for a design that is
+    actually not computable, i.e. the score of a negative exceeds the threshold.
+    So the threshold is the (1 - target_fpr) quantile of the negatives' scores.
+    """
+    neg_scores = p_val[y_val == 0]
+    if len(neg_scores) == 0:
+        return 0.5
+    thr = float(np.quantile(neg_scores, 1.0 - target_fpr))
+    # Nudge above the quantile so exactly-equal negative scores fall below it.
+    return min(1.0, np.nextafter(thr, 1.0))
+
+
 def confusion(y, p, thresh):
     pred = (p >= thresh).astype(int)
     tp = int(((pred == 1) & (y == 1)).sum())
@@ -104,6 +120,10 @@ def main():
     ap.add_argument("--val-frac", type=float, default=0.15)
     ap.add_argument("--threshold", type=float, default=0.5,
                     help="decision threshold for the reported confusion matrix")
+    ap.add_argument("--target-fpr", type=float, default=0.01,
+                    help="pick a deployment threshold on the validation set whose "
+                         "false-positive rate (predicting computable when it is "
+                         "not) is <= this; 0 disables and keeps --threshold")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -156,6 +176,21 @@ def main():
           f"precision={cm['precision']:.4f}  recall={cm['recall']:.4f}  f1={cm['f1']:.4f}")
     print(f"  TP={cm['tp']}  TN={cm['tn']}  FP={cm['fp']}  FN={cm['fn']}")
 
+    # ── Pick a low-FP deployment threshold on validation, report on test ───
+    deploy_thr, cm_deploy = args.threshold, cm
+    if args.target_fpr and args.target_fpr > 0:
+        p_val = model.predict(dval)
+        deploy_thr = threshold_for_fpr(y[va_idx], p_val, args.target_fpr)
+        cm_deploy = confusion(yte, p, deploy_thr)
+        test_fpr = cm_deploy["fp"] / max(cm_deploy["fp"] + cm_deploy["tn"], 1)
+        print(f"\nDeployment threshold for <= {args.target_fpr:.1%} FPR "
+              f"(tuned on val): {deploy_thr:.4f}")
+        print(f"At threshold={deploy_thr:.4f}:  acc={cm_deploy['accuracy']:.4f}  "
+              f"precision={cm_deploy['precision']:.4f}  recall={cm_deploy['recall']:.4f}  "
+              f"f1={cm_deploy['f1']:.4f}")
+        print(f"  TP={cm_deploy['tp']}  TN={cm_deploy['tn']}  "
+              f"FP={cm_deploy['fp']}  FN={cm_deploy['fn']}  (test FPR={test_fpr:.3%})")
+
     # ── Save model + metadata ─────────────────────────────────────────────
     os.makedirs(args.output_dir, exist_ok=True)
     model_path = os.path.join(args.output_dir, "xgb_within_bounds.json")
@@ -172,6 +207,9 @@ def main():
         "best_iteration": int(model.best_iteration),
         "test_roc_auc": float(auc), "test_pr_auc": float(ap_),
         "test_confusion": cm,
+        "target_fpr": float(args.target_fpr),
+        "deploy_threshold": float(deploy_thr),
+        "test_confusion_deploy": cm_deploy,
         "params": params,
     }
     meta_path = os.path.join(args.output_dir, "model_metadata.json")

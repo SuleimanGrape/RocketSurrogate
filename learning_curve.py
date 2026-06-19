@@ -55,11 +55,13 @@ EARLY_STOP = 30
 # Targets highlighted individually on the plot (the rest fold into the mean).
 KEY_TARGETS = ["apogee_m", "max_velocity_mps", "max_mach", "stability_margin_calibers"]
 
-# Optional: targets trained on log1p(y) (inverted at predict) for heavy tails.
-# Tested on max_acceleration_mps2 (mean 255, spikes to 2000) — it did NOT help
-# (R^2 0.771 -> 0.761), so the set is empty. The plateau there is inherent
-# noise/feature limitation, not a scale problem. Kept as a hook for future use.
-LOG_TARGETS = set()
+# Targets trained on log1p(y) (inverted at predict) for heavy tails — kept in
+# sync with model.LOG1P_TARGETS so the curve reflects the production setup.
+# NOTE: log1p slightly LOWERS this curve's R^2 for max_acceleration_mps2 (R^2 is
+# dominated by the rare ~2000 spikes the transform deweights); it's enabled in
+# production because it cuts typical error (MAE ~23%, MAPE 4.4%->2.7%), which R^2
+# doesn't capture. Read MAE/MAPE, not R^2, for this one target.
+from model import LOG1P_TARGETS as LOG_TARGETS  # noqa: E402
 
 
 def _fingerprint(inp: dict) -> str:
