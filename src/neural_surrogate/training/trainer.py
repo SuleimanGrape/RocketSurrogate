@@ -115,7 +115,7 @@ class Trainer:
         self.use_amp = use_amp and self.device.type == "cuda"
 
         if scheduler == "cosine":
-            self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T0=scheduler_T0, T_mult=2)
+            self.scheduler = CosineAnnealingWarmRestarts(self.optimizer, T_0=scheduler_T0, T_mult=2)
         elif scheduler == "plateau":
             self.scheduler = ReduceLROnPlateau(self.optimizer, patience=10, factor=0.5)
         else:
