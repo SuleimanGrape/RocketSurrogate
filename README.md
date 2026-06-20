@@ -39,7 +39,10 @@ Closed-Loop Active Learning (co-evolution)
 - Feature engineering (aspect ratio, thrust-to-weight, ballistic coefficient, fin loading, and exact closed-form **Barrowman cg/cp/stability-margin** features shared by both model families)
 - **XGBoost surrogate** (12 numeric targets, native categorical support) trained on ~38.6k computable samples: test R² ≥ 0.996 on 11/12 targets (stability margin 0.999, cg/cp 1.000)
 - **`within_bounds` feasibility classifier** (XGBoost binary): test ROC-AUC ≈ 0.99, PR-AUC ≈ 0.99
-- Sample-complexity tooling: regression, classifier, and neural learning-curve studies (`learning_curve.py`, `classifier_curve.py`, `nn_learning_curve.py`)
+- **Neural surrogate** (ResMLP + categorical embeddings, Huber loss, log1p on the heavy-tailed accel target): trains on the full computable corpus to mean test R² ≈ 0.99; canonical bundle saved to `models/neural/`
+- **Differentiable surrogate + gradient-based design optimization** — the whole pipeline (raw params → engineered features incl. Barrowman → scaling → network → natural-unit metrics) is reimplemented in torch (`src/neural_surrogate/optim/`), so `d(metric)/d(design)` flows by autograd; `eval_gradients.py` scores gradient quality against ground truth (analytic Barrowman for Class-1, simulator finite-difference for Class-2)
+- **Sobolev formula distillation** (`train_distill_class1.py`) — fine-tunes the surrogate on unlimited exact synthetic Barrowman data with value + derivative matching, repairing the closed-form targets' gradient fields while real-corpus replay preserves the flight-dynamics targets
+- Sample-complexity tooling: one learning-curve study with `learning_curve.py --mode {surrogate,classifier,nn}`
 - Train/val/test splitting and evaluation with metrics tables
 
 **In Progress:**
@@ -99,24 +102,45 @@ python src/gbt/train_classifier.py --data outputs/rocket_data_full.jsonl \
     --output-dir models/classifier --plots-dir plots/classifier
 ```
 
-### Train Neural Surrogate (on the ROCm/CUDA machine)
+### Train Neural Surrogate
+
+Trains on CPU in minutes (a GPU only pays off at the millions-of-rows scale of formula distillation). `--save-dir` writes a portable, self-contained bundle (weights + config + scalers + metadata) mirroring `models/surrogate/`:
 
 ```bash
-python src/neural_surrogate/train_surrogate.py --data outputs/rocket_data_full.jsonl --model mlp --device auto
+python src/neural_surrogate/train_surrogate.py --data outputs/rocket_data_full.jsonl \
+    --model resmlp --loss huber --lr 5e-4 --train-frac 0.70 --val-frac 0.15 --test-frac 0.15 \
+    --save-dir models/neural --device auto
+```
+
+### Gradient-Based Design Optimization
+
+Score the surrogate's gradient quality against ground truth (analytic Barrowman for cg/cp/stability; add `--with-sim` to finite-difference the simulator for the flight-dynamics targets):
+
+```bash
+python src/neural_surrogate/eval_gradients.py --bundle models/neural \
+    --data outputs/rocket_data_full.jsonl --n-class1 400 --with-sim --n-sim 3
+```
+
+Repair the closed-form targets' gradients with Sobolev (value + derivative) distillation on exact synthetic data — scales to millions of rows / the $100 AMD GPU via `--synth` / `--device`:
+
+```bash
+python src/neural_surrogate/train_distill_class1.py --bundle models/neural \
+    --data outputs/rocket_data_full.jsonl --synth 150000 --epochs 8 \
+    --save-dir models/neural_distilled
 ```
 
 ### Sample-Complexity Studies
 
 ```bash
-python learning_curve.py  --inputs outputs/rocket_data_full.jsonl --out-dir outputs/learning_curve
-python classifier_curve.py --inputs outputs/rocket_data_full.jsonl --out-dir outputs/classifier_curve
-python nn_learning_curve.py --data outputs/rocket_data_full.jsonl --device auto
+python learning_curve.py --mode surrogate  --inputs outputs/rocket_data_full.jsonl --out-dir outputs/learning_curve
+python learning_curve.py --mode classifier --inputs outputs/rocket_data_full.jsonl --out-dir outputs/classifier_curve
+python learning_curve.py --mode nn         --inputs outputs/rocket_data_full.jsonl --device auto
 ```
 
 ### Run Timing Benchmark
 
 ```bash
-python run_ten_rockets.py --seed 42
+python tools/run_ten_rockets.py --seed 42
 ```
 
 ## Project Structure
@@ -128,17 +152,14 @@ RocketSurrogate/
 ├── requirements.txt
 ├── run_with_monitor.py           # Resilient generation runner (flush/resume/health log, captures within_bounds=false)
 ├── run_generation.ps1            # Convenience launcher for run_with_monitor.py
-├── run_ten_rockets.py            # Timing benchmark
 ├── run_sim_and_train.py          # End-to-end simulation → training
 ├── consolidate_dataset.py        # Merge + dedup multiple runs into one corpus
 ├── backfill_within_bounds.py     # Stamp within_bounds=true on legacy data files
-├── learning_curve.py             # XGBoost regression accuracy vs sample count
-├── classifier_curve.py           # within_bounds classifier accuracy vs sample count
-├── nn_learning_curve.py          # Neural surrogate accuracy vs sample count (+XGB overlay)
-├── analyze_health.py             # Inspect RSS/health logs from a run
-├── diagnose.py                   # Run/data diagnostics
-├── bench_compare.py              # Benchmark comparison
-├── bench_memory.py               # Memory benchmark
+├── learning_curve.py             # Sample-complexity study: --mode {surrogate,classifier,nn}
+├── tools/                        # Benchmarks & diagnostics
+│   ├── run_ten_rockets.py        #   Timing benchmark
+│   ├── bench_compare.py          #   Benchmark comparison
+│   └── bench_memory.py           #   Memory benchmark
 ├── src/
 │   ├── common/                   # Shared single-source-of-truth package (pure numpy)
 │   │   ├── schema.py             # Canonical input/target fields, encodings, cardinalities
@@ -168,9 +189,15 @@ RocketSurrogate/
 │       ├── data/dataset.py       # Label-aware loading + engineered-feature parity with gbt
 │       ├── models/surrogate.py   # MLP / ResMLP / Feature-Transformer
 │       ├── training/trainer.py   # Training loop (CUDA/ROCm auto-device)
-│       └── train_surrogate.py    # Neural surrogate entry point
+│       ├── optim/                # Differentiable surrogate for gradient-based design optimization
+│       │   ├── diff_features.py  #   Torch reimpl. of the 14 engineered features (incl. Barrowman)
+│       │   └── diff_surrogate.py #   End-to-end differentiable raw-params → metrics wrapper
+│       ├── train_surrogate.py    # Neural surrogate entry point (--loss, --save-dir bundle)
+│       ├── eval_gradients.py     # Gradient-quality eval vs analytic + simulator ground truth
+│       └── train_distill_class1.py  # Sobolev formula distillation for the closed-form targets
 ├── tests/
 │   ├── test_schema.py            # Schema consistency checks
+│   ├── test_diff_features.py     # Differentiable features match numpy + autograd correctness
 │   └── debug_params.py
 ├── models/                       # Trained models (gitignored)
 ├── plots/                        # Evaluation plots (gitignored)
