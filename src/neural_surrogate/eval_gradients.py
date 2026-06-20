@@ -58,6 +58,19 @@ CLASS2 = [  # 6-DOF flight-dynamics targets (need the simulator for ground truth
     "rail_exit_velocity_mps", "max_dynamic_pressure_pa",
 ]
 
+# The 11 design variables the gradient optimizer actually steps (geometry + mass
+# + motor). The 6 environment/launch inputs are held fixed during design
+# optimization and have near-zero sensitivity for many targets, so including them
+# only injects finite-difference / NN noise into a full-vector cosine. Gradient
+# quality is therefore most honestly measured on this subspace and on the
+# significant-sensitivity dimensions (see _masked_cosine).
+DESIGN_VARS = [
+    "length_m", "nose_length_m", "fin_root_chord_m", "fin_tip_chord_m",
+    "fin_span_m", "fin_sweep_m", "fin_thickness_mm", "dry_mass_kg",
+    "propellant_mass_kg", "burn_time_s", "avg_thrust_N",
+]
+DESIGN_IDX = [CONT.index(n) for n in DESIGN_VARS]
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 def _load_designs(path, n, seed, motor_filter=None):
@@ -79,6 +92,24 @@ def _cosine(a, b, axis=-1, eps=1e-12):
     num = (a * b).sum(axis=axis)
     den = np.linalg.norm(a, axis=axis) * np.linalg.norm(b, axis=axis)
     return num / np.maximum(den, eps)
+
+
+def _masked_cosine(a, b, mask, eps=1e-12):
+    """Row-wise cosine restricted to the columns selected by `mask` (a boolean
+    array broadcastable to a/b). Used for the design-subspace and significant-
+    sensitivity cosines."""
+    a, b = a * mask, b * mask
+    num = (a * b).sum(axis=-1)
+    den = np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1)
+    return num / np.maximum(den, eps)
+
+
+def _significant_mask(b, tau=0.05):
+    """Per-row mask of the dimensions where |true gradient| is at least `tau` of
+    that row's largest partial — the dimensions that actually steer the optimizer.
+    A full-vector cosine is dominated by noise on the (many) near-zero partials."""
+    m = np.abs(b)
+    return m >= tau * m.max(axis=-1, keepdims=True)
 
 
 def _rel_l2(a, b, axis=-1, eps=1e-12):
@@ -112,14 +143,22 @@ def eval_class1(surr, cont, cat):
     nn_vals = surr.predict(torch.tensor(cont, dtype=torch.float32),
                            torch.tensor(cat, dtype=torch.long)).numpy()
 
+    design_mask = np.zeros(len(CONT), dtype=bool)
+    design_mask[DESIGN_IDX] = True
+
     results = {}
     for tname in CLASS1:
         ti = surr.target_index(tname)
         g_nn = J[:, ti, :]
         g_true = true_grads[tname]
+        sig = _significant_mask(g_true)
         results[tname] = {
             "grad_cosine_mean": float(np.mean(_cosine(g_nn, g_true))),
             "grad_cosine_median": float(np.median(_cosine(g_nn, g_true))),
+            # design-subspace: only the 11 inputs the optimizer steps
+            "grad_cosine_design_mean": float(np.mean(_masked_cosine(g_nn, g_true, design_mask))),
+            # significant-sensitivity: only dims with |true grad| >= 5% of the row max
+            "grad_cosine_sig_mean": float(np.mean(_masked_cosine(g_nn, g_true, sig))),
             "grad_rel_l2_median": float(np.median(_rel_l2(g_nn, g_true))),
             "value_r2": _r2(nn_vals[:, ti], true_vals[tname]),
             "value_mae": float(np.mean(np.abs(nn_vals[:, ti] - true_vals[tname]))),
@@ -200,13 +239,26 @@ def _sim_once(params):
         return None
 
 
-def eval_class2(surr, recs, cont, cat, rel_step, abs_floor):
+def _central_diff(base_params, key, x0, h, targets):
+    """One central-difference partial (returns dict target->slope, or None)."""
+    pp = dict(base_params); pp[key] = x0 + h
+    pm = dict(base_params); pm[key] = x0 - h
+    mp, mm = _sim_once(pp), _sim_once(pm)
+    if mp is None or mm is None:
+        return None
+    return {t: (mp[t] - mm[t]) / (2.0 * h) for t in targets}
+
+
+def eval_class2(surr, recs, cont, cat, rel_step, abs_floor, richardson=False):
     _ensure_sim_imports()
     # NN gradients + values for the whole sim sample
     J = surr.jacobian(torch.tensor(cont, dtype=torch.float32),
                       torch.tensor(cat, dtype=torch.long)).detach().numpy()
     nn_vals = surr.predict(torch.tensor(cont, dtype=torch.float32),
                            torch.tensor(cat, dtype=torch.long)).numpy()
+
+    design_mask = np.zeros(len(CONT), dtype=bool)
+    design_mask[DESIGN_IDX] = True
 
     per_design = []
     for d, rec in enumerate(recs):
@@ -217,19 +269,27 @@ def eval_class2(surr, recs, cont, cat, rel_step, abs_floor):
             continue
         # FD over the 17 continuous inputs (central difference). A perturbation
         # that fails to simulate just leaves that input's partial as NaN — the
-        # other inputs still yield a usable gradient direction.
+        # other inputs still yield a usable gradient direction. With --richardson
+        # the slope is Richardson-extrapolated from steps h and h/2,
+        # g = (4·g_{h/2} - g_h)/3, which cancels the leading O(h^2) truncation
+        # error so the FD "ground truth" is itself less noisy.
         fd = {t: np.full(len(CONT), np.nan) for t in CLASS2}
         n_ok = 0
         for k, key in enumerate(CONT):
             x0 = float(base_params[key])
             h = max(rel_step * abs(x0), abs_floor.get(key, rel_step))
-            pp = dict(base_params); pp[key] = x0 + h
-            pm = dict(base_params); pm[key] = x0 - h
-            mp, mm = _sim_once(pp), _sim_once(pm)
-            if mp is None or mm is None:
+            g_h = _central_diff(base_params, key, x0, h, CLASS2)
+            if g_h is None:
                 continue
+            if richardson:
+                g_h2 = _central_diff(base_params, key, x0, h / 2.0, CLASS2)
+                if g_h2 is None:
+                    continue
+                slopes = {t: (4.0 * g_h2[t] - g_h[t]) / 3.0 for t in CLASS2}
+            else:
+                slopes = g_h
             for t in CLASS2:
-                fd[t][k] = (mp[t] - mm[t]) / (2.0 * h)
+                fd[t][k] = slopes[t]
             n_ok += 1
         if n_ok < 3:
             print(f"  design {d}: only {n_ok} input partials succeeded, skipping")
@@ -237,14 +297,17 @@ def eval_class2(surr, recs, cont, cat, rel_step, abs_floor):
         entry = {"design_index": d, "n_input_partials": n_ok, "targets": {}}
         for t in CLASS2:
             ti = surr.target_index(t)
-            g_true = fd[t]
-            m = np.isfinite(g_true)
-            g_nn = J[d, ti, :][m]
-            g_true = g_true[m]
+            g_true_full = fd[t]
+            finite = np.isfinite(g_true_full)
+            g_true = np.where(finite, g_true_full, 0.0)[None, :]
+            g_nn = J[d, ti, :][None, :]
+            sig = finite & _significant_mask(g_true)[0]
             entry["targets"][t] = {
-                "grad_cosine": float(_cosine(g_nn, g_true)),
-                "grad_rel_l2": float(_rel_l2(g_nn, g_true)),
-                "sign_agree_frac": float(np.mean(np.sign(g_nn) == np.sign(g_true))),
+                "grad_cosine": float(_masked_cosine(g_nn, g_true, finite[None, :])[0]),
+                "grad_cosine_design": float(_masked_cosine(g_nn, g_true, (finite & design_mask)[None, :])[0]),
+                "grad_cosine_sig": float(_masked_cosine(g_nn, g_true, sig[None, :])[0]),
+                "grad_rel_l2": float(_rel_l2(g_nn[0][finite], g_true[0][finite])),
+                "sign_agree_frac": float(np.mean(np.sign(g_nn[0][finite]) == np.sign(g_true_full[finite]))),
                 "nn_value": float(nn_vals[d, ti]),
                 "sim_value": float(base[t]),
             }
@@ -255,12 +318,16 @@ def eval_class2(surr, recs, cont, cat, rel_step, abs_floor):
     agg = {}
     for t in CLASS2:
         cos = [e["targets"][t]["grad_cosine"] for e in per_design]
+        cosd = [e["targets"][t]["grad_cosine_design"] for e in per_design]
+        coss = [e["targets"][t]["grad_cosine_sig"] for e in per_design]
         rl2 = [e["targets"][t]["grad_rel_l2"] for e in per_design]
         sgn = [e["targets"][t]["sign_agree_frac"] for e in per_design]
         nn = np.array([e["targets"][t]["nn_value"] for e in per_design])
         sv = np.array([e["targets"][t]["sim_value"] for e in per_design])
         agg[t] = {
             "grad_cosine_mean": float(np.mean(cos)) if cos else None,
+            "grad_cosine_design_mean": float(np.mean(cosd)) if cosd else None,
+            "grad_cosine_sig_mean": float(np.mean(coss)) if coss else None,
             "grad_rel_l2_median": float(np.median(rl2)) if rl2 else None,
             "sign_agree_mean": float(np.mean(sgn)) if sgn else None,
             "value_mae": float(np.mean(np.abs(nn - sv))) if len(nn) else None,
@@ -283,6 +350,10 @@ def main():
                         "so no zombie integrator threads accumulate across the 34 "
                         "solves/design (large classes can deadlock the diagnostic).")
     p.add_argument("--rel-step", type=float, default=0.02)
+    p.add_argument("--richardson", action="store_true",
+                   help="Richardson-extrapolate the sim FD from steps h and h/2 "
+                        "(g=(4·g_h/2 - g_h)/3) — cancels the O(h^2) truncation error "
+                        "in the ground-truth gradient at 2x the solves per input")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--class1-exact", action="store_true",
                    help="Splice exact analytic Barrowman for cg/cp/stability "
@@ -302,8 +373,8 @@ def main():
     c1 = eval_class1(surr, cont, cat)
     report["class1"] = c1
     for t, m in c1.items():
-        print(f"  {t:28s} grad_cos={m['grad_cosine_mean']:.4f}  "
-              f"rel_l2_med={m['grad_rel_l2_median']:.4f}  "
+        print(f"  {t:28s} grad_cos[full={m['grad_cosine_mean']:.4f} "
+              f"design={m['grad_cosine_design_mean']:.4f} sig={m['grad_cosine_sig_mean']:.4f}]  "
               f"value_R2={m['value_r2']:.4f}  value_MAE={m['value_mae']:.4g}")
 
     if args.with_sim:
@@ -315,16 +386,17 @@ def main():
         recs, cont2, cat2 = _load_designs(args.data, args.n_sim, args.seed + 1000,
                                           motor_filter=motor_filter)
         print(f"  (restricted to motor classes {sorted(motor_filter)}: {len(recs)} designs)")
-        c2 = eval_class2(surr, recs, cont2, cat2, args.rel_step, abs_floor)
+        c2 = eval_class2(surr, recs, cont2, cat2, args.rel_step, abs_floor,
+                         richardson=args.richardson)
         report["class2"] = c2["per_target"]
-        print("\n  per-target (averaged over designs):")
+        print("\n  per-target (averaged over designs) — cosine [full / design-subspace / significant-dims]:")
         for t, m in c2["per_target"].items():
             if m["grad_cosine_mean"] is None:
                 print(f"  {t:28s} (no successful designs)")
                 continue
-            print(f"  {t:28s} grad_cos={m['grad_cosine_mean']:.4f}  "
+            print(f"  {t:28s} grad_cos[full={m['grad_cosine_mean']:.3f} "
+                  f"design={m['grad_cosine_design_mean']:.3f} sig={m['grad_cosine_sig_mean']:.3f}]  "
                   f"sign_agree={m['sign_agree_mean']:.3f}  "
-                  f"rel_l2_med={m['grad_rel_l2_median']:.3f}  "
                   f"value_MAE={m['value_mae']:.4g}  (n={m['n_designs']})")
 
     out = Path(args.out)
