@@ -60,9 +60,11 @@ CLASS2 = [  # 6-DOF flight-dynamics targets (need the simulator for ground truth
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-def _load_designs(path, n, seed):
+def _load_designs(path, n, seed, motor_filter=None):
     recs = [r for r in load_jsonl(path)
             if r.get("output", {}).get("within_bounds") is not False]
+    if motor_filter:
+        recs = [r for r in recs if r["input"].get("motor_class") in motor_filter]
     rng = np.random.default_rng(seed)
     idx = rng.permutation(len(recs))[:n]
     recs = [recs[i] for i in idx]
@@ -186,8 +188,11 @@ def _sim_once(params):
     # run_simulation has the per-motor-class thread-join timeout; simulate_flight
     # does NOT, and a perturbed design can integrate for minutes. For a bounded
     # diagnostic the threaded timeout (daemon-thread caveat) is the right call.
+    # NB: no is_valid() filter here — the FD ground truth is the simulator's true
+    # output at the perturbed point, even if that point lies outside the dataset's
+    # acceptance bounds (the optimizer may query the surrogate there too).
     flight = _SIM["simulator"].run_simulation(rocket, params)
-    if flight is None or not _SIM["validator"].is_valid(params, flight):
+    if flight is None:
         return None
     try:
         return _raw_metrics(flight, params)
@@ -210,9 +215,11 @@ def eval_class2(surr, recs, cont, cat, rel_step, abs_floor):
         if base is None:
             print(f"  design {d}: baseline sim failed, skipping")
             continue
-        # FD over the 17 continuous inputs (central difference)
-        fd = {t: np.zeros(len(CONT)) for t in CLASS2}
-        ok = True
+        # FD over the 17 continuous inputs (central difference). A perturbation
+        # that fails to simulate just leaves that input's partial as NaN — the
+        # other inputs still yield a usable gradient direction.
+        fd = {t: np.full(len(CONT), np.nan) for t in CLASS2}
+        n_ok = 0
         for k, key in enumerate(CONT):
             x0 = float(base_params[key])
             h = max(rel_step * abs(x0), abs_floor.get(key, rel_step))
@@ -220,18 +227,20 @@ def eval_class2(surr, recs, cont, cat, rel_step, abs_floor):
             pm = dict(base_params); pm[key] = x0 - h
             mp, mm = _sim_once(pp), _sim_once(pm)
             if mp is None or mm is None:
-                ok = False
-                break
+                continue
             for t in CLASS2:
                 fd[t][k] = (mp[t] - mm[t]) / (2.0 * h)
-        if not ok:
-            print(f"  design {d}: a perturbed sim failed, skipping")
+            n_ok += 1
+        if n_ok < 3:
+            print(f"  design {d}: only {n_ok} input partials succeeded, skipping")
             continue
-        entry = {"design_index": d, "targets": {}}
+        entry = {"design_index": d, "n_input_partials": n_ok, "targets": {}}
         for t in CLASS2:
             ti = surr.target_index(t)
-            g_nn = J[d, ti, :]
             g_true = fd[t]
+            m = np.isfinite(g_true)
+            g_nn = J[d, ti, :][m]
+            g_true = g_true[m]
             entry["targets"][t] = {
                 "grad_cosine": float(_cosine(g_nn, g_true)),
                 "grad_rel_l2": float(_rel_l2(g_nn, g_true)),
@@ -240,7 +249,7 @@ def eval_class2(surr, recs, cont, cat, rel_step, abs_floor):
                 "sim_value": float(base[t]),
             }
         per_design.append(entry)
-        print(f"  design {d}: done ({len(per_design)} ok)")
+        print(f"  design {d}: done, {n_ok}/17 input partials ({len(per_design)} designs ok)")
 
     # aggregate per target
     agg = {}
@@ -268,6 +277,11 @@ def main():
     p.add_argument("--with-sim", action="store_true",
                    help="Also finite-difference the RocketPy simulator for Class-2 targets")
     p.add_argument("--n-sim", type=int, default=3)
+    p.add_argument("--sim-motor-classes", type=str, default="D,E,F",
+                   help="Restrict the sim FD sample to these motor classes. Small "
+                        "motors solve in <1s and never hit run_simulation's timeout, "
+                        "so no zombie integrator threads accumulate across the 34 "
+                        "solves/design (large classes can deadlock the diagnostic).")
     p.add_argument("--rel-step", type=float, default=0.02)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--class1-exact", action="store_true",
@@ -297,7 +311,10 @@ def main():
               f"rel_step={args.rel_step}) ===")
         abs_floor = {"wind_speed_mps": 0.1, "fin_sweep_m": 0.002,
                      "elevation_m": 5.0, "wind_direction_deg": 1.0}
-        recs, cont2, cat2 = _load_designs(args.data, args.n_sim, args.seed + 1000)
+        motor_filter = set(c.strip() for c in args.sim_motor_classes.split(",") if c.strip())
+        recs, cont2, cat2 = _load_designs(args.data, args.n_sim, args.seed + 1000,
+                                          motor_filter=motor_filter)
+        print(f"  (restricted to motor classes {sorted(motor_filter)}: {len(recs)} designs)")
         c2 = eval_class2(surr, recs, cont2, cat2, args.rel_step, abs_floor)
         report["class2"] = c2["per_target"]
         print("\n  per-target (averaged over designs):")
