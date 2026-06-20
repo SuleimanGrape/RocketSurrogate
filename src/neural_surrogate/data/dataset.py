@@ -162,13 +162,16 @@ class RocketDataset(Dataset):
         target_keys=TARGETS,
         encoding_maps=ENCODING_MAPS,
         engineer_features: bool = True,
+        log1p_targets=None,
     ) -> "RocketDataset":
         """Load a JSONL file produced by the generator into a RocketDataset.
 
         Not-computable (within_bounds=False) records are dropped. When
-        engineer_features is True (default) the same engineered continuous
-        features the XGBoost trees use are appended, for an apples-to-apples
-        comparison and to give the NN the Barrowman stability signal.
+        engineer_features is True (default) the shared engineered continuous
+        features (common/features, incl. Barrowman) are appended to give the NN
+        the stability signal. ``log1p_targets`` overrides which targets are fit
+        in log1p space (default: the shared LOG1P_TARGETS set); pass an expanded
+        set (e.g. apogee_m, max_mach) to better condition heavy-tailed targets.
         """
         records = [r for r in load_jsonl(path) if _is_positive(r)]
         cont, cat, tgt = records_to_arrays(
@@ -179,11 +182,13 @@ class RocketDataset(Dataset):
             eng, eng_names = engineered_continuous(records)
             cont = np.hstack([cont, eng]).astype(np.float32)
             cont_names = cont_names + eng_names
-        # Heavy-tailed targets are fit in log1p space (shared LOG1P_TARGETS set);
-        # evaluate() inverts them with expm1. Single source of truth in
-        # common/features so every consumer treats the tail identically.
-        from features import LOG1P_TARGETS  # common (on sys.path above)
-        log1p_indices = [i for i, k in enumerate(target_keys) if k in LOG1P_TARGETS]
+        # Heavy-tailed targets are fit in log1p space; evaluate() inverts them
+        # with expm1. Default set lives in common/features (single source of
+        # truth) and can be overridden per training run.
+        if log1p_targets is None:
+            from features import LOG1P_TARGETS  # common (on sys.path above)
+            log1p_targets = LOG1P_TARGETS
+        log1p_indices = [i for i, k in enumerate(target_keys) if k in log1p_targets]
         for i in log1p_indices:
             tgt[:, i] = np.log1p(tgt[:, i])
         return RocketDataset(cont, cat, tgt, continuous_names=cont_names,

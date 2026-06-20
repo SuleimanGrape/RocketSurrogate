@@ -44,7 +44,7 @@ import torch                              # noqa: E402
 import schema                             # noqa: E402
 from dataio import load_jsonl            # noqa: E402
 
-from optim.diff_surrogate import DifferentiableSurrogate  # noqa: E402
+from optim.diff_surrogate import DifferentiableSurrogate, load_surrogate  # noqa: E402
 from optim.diff_features import continuous_block, CONTINUOUS_NAMES, CONT  # noqa: E402
 
 CLASS1 = {  # target name -> exact engineered column it equals
@@ -358,13 +358,23 @@ def main():
     p.add_argument("--class1-exact", action="store_true",
                    help="Splice exact analytic Barrowman for cg/cp/stability "
                         "(perfect value+gradient; the recommended optimizer config)")
+    p.add_argument("--ensemble", type=str, default=None,
+                   help="Comma-separated additional bundle dirs to ensemble with "
+                        "--bundle; the members' values and gradients are averaged "
+                        "(variance reduction for the flight-dynamics gradients)")
     p.add_argument("--out", type=str, default="../../outputs/gradient_eval.json")
     args = p.parse_args()
 
-    surr = DifferentiableSurrogate(args.bundle, class1_exact=args.class1_exact)
-    print(f"Loaded surrogate from {args.bundle} "
-          f"(arch={surr.model.__class__.__name__}, targets={len(surr.targets)}, "
-          f"class1_exact={args.class1_exact})")
+    if args.ensemble:
+        bundles = [args.bundle] + [b.strip() for b in args.ensemble.split(",") if b.strip()]
+        surr = load_surrogate(bundles, class1_exact=args.class1_exact)
+        print(f"Loaded {len(bundles)}-member ensemble surrogate "
+              f"(targets={len(surr.targets)}, class1_exact={args.class1_exact})")
+    else:
+        surr = DifferentiableSurrogate(args.bundle, class1_exact=args.class1_exact)
+        print(f"Loaded surrogate from {args.bundle} "
+              f"(arch={surr.model.__class__.__name__}, targets={len(surr.targets)}, "
+              f"class1_exact={args.class1_exact})")
 
     report = {"bundle": args.bundle, "data": args.data}
 

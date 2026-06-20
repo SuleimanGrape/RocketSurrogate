@@ -125,9 +125,48 @@ class DifferentiableSurrogate(nn.Module):
         return self.targets.index(name)
 
 
-def load_surrogate(bundle_dir: Optional[str] = None, device: str = "cpu",
-                   class1_exact: bool = False) -> DifferentiableSurrogate:
-    """Load the canonical bundle (defaults to models/neural/).
+class EnsembleSurrogate(nn.Module):
+    """Average several differentiable surrogates (trained with different seeds).
+
+    The gradient is a high-variance functional of the weights, so averaging the
+    members' input-gradients cancels much of the spurious, model-specific
+    component while preserving the shared physical signal — often improving
+    gradient direction more than it improves value error. forward() and
+    jacobian() return the member-mean, so an EnsembleSurrogate is a drop-in for
+    DifferentiableSurrogate in eval_gradients and the design optimizer.
+    """
+
+    def __init__(self, members: List[DifferentiableSurrogate]):
+        super().__init__()
+        if not members:
+            raise ValueError("EnsembleSurrogate needs at least one member")
+        self.members = nn.ModuleList(members)
+        m0 = members[0]
+        self.targets = m0.targets
+        self.continuous_inputs = m0.continuous_inputs
+        self.categorical_inputs = m0.categorical_inputs
+        self.class1_exact = m0.class1_exact
+
+    def forward(self, x_cont_raw: torch.Tensor, x_cat: torch.Tensor) -> torch.Tensor:
+        return torch.stack([m(x_cont_raw, x_cat) for m in self.members], 0).mean(0)
+
+    def jacobian(self, x_cont_raw: torch.Tensor, x_cat: torch.Tensor) -> torch.Tensor:
+        return torch.stack([m.jacobian(x_cont_raw, x_cat) for m in self.members], 0).mean(0)
+
+    @torch.no_grad()
+    def predict(self, x_cont_raw: torch.Tensor, x_cat: torch.Tensor):
+        return self.forward(x_cont_raw, x_cat)
+
+    def target_index(self, name: str) -> int:
+        return self.targets.index(name)
+
+
+def load_surrogate(bundle_dir=None, device: str = "cpu",
+                   class1_exact: bool = False):
+    """Load a surrogate (defaults to models/neural/).
+
+    ``bundle_dir`` may be a single bundle path or a list of paths; a list returns
+    an EnsembleSurrogate that averages the members' values and gradients.
 
     Set class1_exact=True for the recommended optimizer configuration: the NN
     serves the 9 flight-dynamics targets while cg/cp/stability are taken from the
@@ -135,4 +174,8 @@ def load_surrogate(bundle_dir: Optional[str] = None, device: str = "cpu",
     """
     if bundle_dir is None:
         bundle_dir = os.path.join(_HERE, "..", "..", "..", "models", "neural")
+    if isinstance(bundle_dir, (list, tuple)):
+        members = [DifferentiableSurrogate(b, device=device, class1_exact=class1_exact)
+                   for b in bundle_dir]
+        return members[0] if len(members) == 1 else EnsembleSurrogate(members)
     return DifferentiableSurrogate(bundle_dir, device=device, class1_exact=class1_exact)

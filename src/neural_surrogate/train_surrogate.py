@@ -82,6 +82,12 @@ def parse_args():
                    help="DataLoader workers (set > 0 when training on GPU)")
     p.add_argument("--no-engineer", action="store_true",
                    help="Disable engineered features (Barrowman etc.); use raw inputs only")
+    p.add_argument("--log1p-targets", type=str, default=None,
+                   help="Comma-separated targets to fit in log1p space, overriding the "
+                        "default set (max_acceleration_mps2). e.g. "
+                        "'max_acceleration_mps2,apogee_m,max_mach' better conditions the "
+                        "heavy-tailed / wide-dynamic-range targets and tends to improve "
+                        "their gradient quality for design optimization.")
     return p.parse_args()
 
 
