@@ -2,23 +2,22 @@
 
 ## Overview
 
-RocketSurrogate generates synthetic rocket design data using [RocketPy](https://github.com/RocketPy-Team/RocketPy) 6-DOF flight simulations. The project produces large-scale datasets of realistic rocket designs paired with their simulated flight outcomes, then trains a cascaded pipeline of physics surrogate models that replaces expensive simulations with fast inference. The cascaded pipeline (XGBoost → Neural Network → LLM) is extended with a **closed-loop active learning framework** in which the LLM and neural surrogate co-evolve to discover high-performing rocket designs.
+RocketSurrogate generates synthetic rocket design data using [RocketPy](https://github.com/RocketPy-Team/RocketPy) 6-DOF flight simulations. The project produces large-scale datasets of realistic rocket designs paired with their simulated flight outcomes, then trains a **differentiable neural surrogate** that replaces expensive simulations with fast inference. Because the surrogate is differentiable end-to-end, designs can be optimized directly by gradient ascent; the surrogate is further extended with a **closed-loop active learning framework** in which an LLM proposer and the neural surrogate evaluator co-evolve to discover high-performing rocket designs.
 
 **Research paper:** *"Closing the Loop: Active Exploration of Rocket Design Space with LLM Policies and Neural Surrogates"* — see `docs/paper/` for the full draft and formatted document.
 
 ## Architecture
 
-### Cascaded Surrogate Pipeline
+### Surrogate Pipeline
 
 ```
 RocketPy 6-DOF Simulations (expensive, small)
-    │     100–200 samples, ~7s per simulation
+    │     ~7s per simulation, ~30% computable
     ▼
-XGBoost Teacher (accurate, discrete)
-    │     R² > 0.99 on most metrics
-    ▼
-Neural Network Student (fast, differentiable)
-    │     100,000+ predictions/sec on GPU
+Neural Surrogate (fast, differentiable)          ← trained directly on the corpus
+    │     mean test R² ≈ 0.99, 100,000+ pred/sec  + Barrowman/Sobolev formula distillation
+    ├──────────────▶ Gradient-based design optimization (autograd through the surrogate)
+    │                     maximize apogee s.t. stability / Mach / accel / T-W constraints
     ▼
 LLM Fine-Tuning (generative, LoRA on AMD GPU)
     │     Llama 3 7B, QLoRA, $100 budget
@@ -26,6 +25,8 @@ LLM Fine-Tuning (generative, LoRA on AMD GPU)
 Closed-Loop Active Learning (co-evolution)
           LLM proposes → NN evaluates → Select → Retrain both
 ```
+
+A separate XGBoost **feasibility classifier** predicts whether a candidate design is computable at all (`within_bounds`), gating the proposer away from infeasible regions.
 
 ### Data Generation Pipeline
 
@@ -89,11 +90,12 @@ Filters simulation outputs for physical plausibility:
 - Two-stage validation, with the rejected (negative) class captured as `within_bounds=false`
 - JSONL dataset generation with metadata, `within_bounds` labels, and distribution plots
 - Burnout altitude/velocity extraction via flight.solution ODE trajectory
-- XGBoost training pipeline with native categorical feature support and random search tuning
-- Feature engineering: aspect ratio, motor impulse, T/W ratio, fin area ratio, nose-body ratio, slenderness, ballistic coefficient, fin loading, and exact closed-form Barrowman cg/cp/stability-margin features
-- XGBoost regression surrogate (12 targets) trained on ~38.6k samples — test R² ≥ 0.996 on 11/12 targets (stability margin 0.999, cg/cp 1.000; `max_acceleration_mps2` ≈ 0.76, a heavy-tail plateau)
+- Shared feature engineering (`common/features.py`): aspect ratio, motor impulse, T/W ratio, fin area ratio, nose-body ratio, slenderness, ballistic coefficient, fin loading, and exact closed-form Barrowman cg/cp/stability-margin features
+- Neural surrogate (ResMLP + categorical embeddings) trained directly on the full computable corpus — mean test R² ≈ 0.99 (stability margin 0.999, cg/cp ≈ 0.999; `max_acceleration_mps2` ≈ 0.85, a heavy-tail plateau judged by MAE/MAPE)
+- Differentiable surrogate (torch reimplementation incl. Barrowman) + gradient-based design optimizer with real-simulator validation
+- Sobolev formula distillation + `class1_exact` hybrid for exact cg/cp/stability value **and** gradient
 - `within_bounds` feasibility classifier (XGBoost binary) — test ROC-AUC ≈ 0.99, PR-AUC ≈ 0.99
-- Sample-complexity studies for regression, classifier, and neural surrogate
+- Sample-complexity studies for the neural surrogate and the classifier
 - Timing benchmark suite
 - Research paper draft and formatted .docx
 
@@ -306,26 +308,25 @@ python -m src.rocket_sim.generator --count 2000 --method random --workers 6 --ou
 - `--splits-dir DIR` / `--plots-dir DIR` — output directories for splits / plots
 - `--exclude FILES` — de-duplicate inputs against prior runs (run_with_monitor.py)
 
-### Train Surrogates
+### Train the Surrogate + Classifier + Optimize
 
 ```bash
-python src/gbt/train.py --data outputs/rocket_data_full.jsonl --no-tune    # 12-target regression
-python src/gbt/train_classifier.py --data outputs/rocket_data_full.jsonl   # within_bounds feasibility
-python src/neural_surrogate/train_surrogate.py --data outputs/rocket_data_full.jsonl --device auto
+python src/neural_surrogate/train_surrogate.py --data outputs/rocket_data_full.jsonl --save-dir models/neural --device auto
+python src/gbt/train_classifier.py --data outputs/rocket_data_full.jsonl             # within_bounds feasibility
+python src/neural_surrogate/optim/design_optimizer.py --diameter 54 --motor K --validate   # gradient-based design optimization
 ```
 
 ### Sample-Complexity Studies
 
 ```bash
-python learning_curve.py   --inputs outputs/rocket_data_full.jsonl   # regression R² vs N
-python classifier_curve.py --inputs outputs/rocket_data_full.jsonl   # classifier AUC vs N
-python nn_learning_curve.py --data   outputs/rocket_data_full.jsonl   # neural R² vs N
+python learning_curve.py --mode nn         --inputs outputs/rocket_data_full.jsonl   # neural R² vs N
+python learning_curve.py --mode classifier --inputs outputs/rocket_data_full.jsonl   # classifier AUC vs N
 ```
 
 ### Run Timing Benchmark
 
 ```bash
-python run_ten_rockets.py --seed 42 --output outputs/ten_rocket_results.json
+python tools/run_ten_rockets.py --seed 42 --output outputs/ten_rocket_results.json
 ```
 
 ## Performance
@@ -352,18 +353,16 @@ RocketSurrogate/
 ├── README.md                     # Project overview and quick start
 ├── ROCKET.md                     # This file — detailed technical documentation
 ├── requirements.txt
-├── run_ten_rockets.py            # Timing benchmark script
 ├── run_generation.ps1            # Data-generation launcher (PowerShell)
 ├── run_with_monitor.py           # Resilient generator: health log + resume + negative-class capture
 ├── consolidate_dataset.py        # Merge + dedup runs into one corpus
 ├── backfill_within_bounds.py     # Stamp within_bounds=true on legacy data
-├── learning_curve.py             # XGBoost regression accuracy vs N
-├── classifier_curve.py           # within_bounds classifier accuracy vs N
-├── nn_learning_curve.py          # Neural surrogate accuracy vs N
-├── bench_memory.py               # Memory-leak before/after benchmark
+├── learning_curve.py             # Sample-complexity study: --mode {nn,classifier}
+├── tools/                        # Timing + memory benchmarks
 ├── src/
-│   ├── common/                   # Shared, dependency-light modules
+│   ├── common/                   # Shared single-source-of-truth modules
 │   │   ├── schema.py             # SINGLE SOURCE OF TRUTH for input/output fields
+│   │   ├── features.py           # Engineered features (incl. Barrowman) + LOG1P_TARGETS, shared
 │   │   ├── scalers.py            # StandardScaler / MinMaxScaler (shared)
 │   │   └── dataio.py             # load_jsonl
 │   ├── rocket_sim/               # Data generation pipeline
@@ -378,17 +377,19 @@ RocketSurrogate/
 │   │   ├── utils.py              # CG, Barrowman CP, stability
 │   │   ├── splitter.py           # Train/val/test splits
 │   │   └── plotter.py            # Distribution plots
-│   ├── gbt/                      # XGBoost surrogate models
+│   ├── gbt/                      # within_bounds feasibility classifier (XGBoost)
 │   │   ├── data_loader.py        # JSONL loading (label-aware: regression / classification)
-│   │   ├── preprocess.py         # Feature engineering (incl. Barrowman)
-│   │   ├── synthetic_data.py     # Generation wrapper for training
-│   │   ├── model.py              # XGBoost training
-│   │   ├── evaluate.py           # Metrics, plots
-│   │   ├── train.py              # Regression surrogate entry point
 │   │   └── train_classifier.py   # within_bounds feasibility classifier entry point
-│   └── neural_surrogate/         # Neural network surrogate models (label-aware + feature parity)
+│   └── neural_surrogate/         # Neural surrogate + differentiable design optimization
+│       ├── data/, models/, training/   # dataset, architectures, trainer
+│       ├── optim/                # diff_features, diff_surrogate, design_optimizer
+│       ├── train_surrogate.py    # surrogate training (--save-dir bundle)
+│       ├── eval_gradients.py     # gradient-quality eval vs ground truth
+│       └── train_distill_class1.py  # Sobolev formula distillation
 ├── tests/
 │   ├── test_schema.py            # Schema consistency checks
+│   ├── test_diff_features.py     # Differentiable-feature correctness
+│   ├── test_design_optimizer.py  # Optimizer feasibility/improvement checks
 │   └── debug_params.py
 ├── models/                       # Trained models (gitignored)
 ├── plots/                        # Evaluation plots (gitignored)
@@ -411,7 +412,7 @@ RocketSurrogate/
 5. **Process isolation + memory self-regulation** — Each sim runs in a worker with a hard-kill timeout; the pool recycles workers on RSS growth and throttles under RAM pressure, so leaks/hangs cannot crash multi-day runs.
 6. **Capture the negative class** — Rejected designs are saved as `within_bounds=false` so a feasibility classifier can flag designs that are not computable.
 7. **Burnout extraction from ODE trajectory** — Uses flight.solution arrays (t, y) rather than RocketPy's unreliable `.burn_out_altitude` API.
-8. **Feature engineering with parity** — Domain features (ballistic coefficient, fin loading, aspect ratio, T/W) plus exact closed-form Barrowman cg/cp/stability; XGBoost and the neural surrogate share the same feature set.
+8. **Shared, differentiable feature engineering** — Domain features (ballistic coefficient, fin loading, aspect ratio, T/W) plus exact closed-form Barrowman cg/cp/stability live once in `common/features.py`; the neural surrogate and the classifier share them, and `optim/diff_features.py` reimplements them in torch so they are autograd-differentiable.
 9. **Single source of truth for the schema** — `src/common/schema.py` defines all fields/encodings once; every package imports it.
 10. **Closed-loop co-evolution** — The LLM proposer and neural surrogate evaluator improve together through iterative active learning, outperforming static pipelines.
 

@@ -1,28 +1,29 @@
 # RocketSurrogate
 
-Surrogate modeling for rocket flight simulation — cascaded surrogates (XGBoost → Neural Network → LLM) with a closed-loop active learning framework for data-efficient rocket design exploration.
+Surrogate modeling for rocket flight simulation — a **differentiable neural surrogate** of RocketPy that enables gradient-based rocket-design optimization, with a closed-loop active learning framework for data-efficient design exploration.
 
-This project uses [RocketPy](https://github.com/RocketPy-Team/RocketPy) 6-DOF simulations to generate realistic rocket designs paired with their flight outcomes, trains physics surrogate models, and fine-tunes LLMs for generative design. The cascaded pipeline converts a small set of expensive simulations into an arbitrarily large synthetic corpus, and the closed-loop active learning system enables the LLM and neural surrogate to co-evolve toward better designs.
+This project uses [RocketPy](https://github.com/RocketPy-Team/RocketPy) 6-DOF simulations to generate realistic rocket designs paired with their flight outcomes, trains a fast differentiable neural surrogate of the simulator, and fine-tunes LLMs for generative design. Because the whole surrogate (raw design parameters → engineered physics features → network → flight metrics) is reimplemented in torch, `d(metric)/d(design)` flows by autograd, so designs can be optimized directly by gradient ascent. The closed-loop active learning system lets the LLM proposer and the neural surrogate evaluator co-evolve toward better designs.
 
 
 
-## Cascaded Surrogate Pipeline
+## Surrogate Pipeline
 
 ```
-RocketPy (expensive, small)
+RocketPy 6-DOF (expensive, small)
     ↓
-XGBoost Teacher (accurate, discrete)
-    ↓
-Neural Network Student (fast, differentiable)
-    ↓
-LLM Fine-Tuning (generative, LoRA on AMD GPU)
-    ↓
-Closed-Loop Active Learning (co-evolution)
+Neural Surrogate (fast, differentiable)         ← trained directly on the corpus
+    ↓                                             + Barrowman/Sobolev formula distillation
+    ├──→ Gradient-based design optimization (autograd through the surrogate)
+    └──→ LLM Fine-Tuning (generative, LoRA on AMD GPU)
+              ↓
+         Closed-Loop Active Learning (co-evolution)
 ```
+
+A separate XGBoost **feasibility classifier** predicts whether a candidate design is computable at all (`within_bounds`), gating the proposer away from infeasible regions.
 
 ## Research Questions
 
-1. **Surrogate accuracy (baseline):** How accurately does the distilled neural surrogate predict RocketPy flight outcomes?
+1. **Surrogate accuracy (baseline):** How accurately does the neural surrogate predict RocketPy flight outcomes, and how usable are its gradients for design optimization?
 2. **Closed-loop vs. static:** Does iterative active learning discover higher-performing designs than static LLM fine-tuning or Bayesian optimisation?
 3. **Data efficiency:** How many active learning cycles are needed to reach 95% of the maximum achievable objective, and at what cost?
 
@@ -35,19 +36,18 @@ Closed-Loop Active Learning (co-evolution)
 - Two-stage validation (pre/post simulation) with a drag-aware performance gate that skips designs certain to bust the Mach/apogee caps before the expensive solve
 - **Feasibility (`within_bounds`) label** — every record is tagged computable/not-computable, and the generator captures the rejected (negative) class instead of discarding it, so the surrogate can learn what is *not* computable
 - JSONL dataset generation with metadata and distribution plots
-- Single-source-of-truth schema (`src/common/schema.py`) shared across simulation, XGBoost, and neural packages
-- Feature engineering (aspect ratio, thrust-to-weight, ballistic coefficient, fin loading, and exact closed-form **Barrowman cg/cp/stability-margin** features shared by both model families)
-- **XGBoost surrogate** (12 numeric targets, native categorical support) trained on ~38.6k computable samples: test R² ≥ 0.996 on 11/12 targets (stability margin 0.999, cg/cp 1.000)
-- **`within_bounds` feasibility classifier** (XGBoost binary): test ROC-AUC ≈ 0.99, PR-AUC ≈ 0.99
-- **Neural surrogate** (ResMLP + categorical embeddings, Huber loss, log1p on the heavy-tailed accel target): trains on the full computable corpus to mean test R² ≈ 0.99; canonical bundle saved to `models/neural/`
-- **Differentiable surrogate + gradient-based design optimization** — the whole pipeline (raw params → engineered features incl. Barrowman → scaling → network → natural-unit metrics) is reimplemented in torch (`src/neural_surrogate/optim/`), so `d(metric)/d(design)` flows by autograd; `eval_gradients.py` scores gradient quality against ground truth (analytic Barrowman for Class-1, simulator finite-difference for Class-2)
-- **Sobolev formula distillation** (`train_distill_class1.py`) — fine-tunes the surrogate on unlimited exact synthetic Barrowman data with value + derivative matching, repairing the closed-form targets' gradient fields while real-corpus replay preserves the flight-dynamics targets
-- Sample-complexity tooling: one learning-curve study with `learning_curve.py --mode {surrogate,classifier,nn}`
+- Single-source-of-truth schema (`src/common/schema.py`) and shared feature engineering (`src/common/features.py`) consumed by the simulation, neural-surrogate, and classifier packages
+- Feature engineering (aspect ratio, thrust-to-weight, ballistic coefficient, fin loading, and exact closed-form **Barrowman cg/cp/stability-margin** features) shared by the neural surrogate and the feasibility classifier
+- **Neural surrogate** (ResMLP + categorical embeddings, Huber loss, log1p on the heavy-tailed accel target): trained **directly on the full computable corpus** to mean test R² ≈ 0.99 (stability margin 0.999, cg/cp ≈ 0.999); canonical bundle saved to `models/neural/`
+- **`within_bounds` feasibility classifier** (XGBoost binary): test ROC-AUC ≈ 0.99, PR-AUC ≈ 0.99, with a low-false-positive deployment threshold for the LLM gate
+- **Differentiable surrogate + gradient-based design optimizer** — the whole pipeline (raw params → engineered features incl. Barrowman → scaling → network → natural-unit metrics) is reimplemented in torch (`src/neural_surrogate/optim/`), so `d(metric)/d(design)` flows by autograd; `design_optimizer.py` maximizes apogee (or any target) under the physical constraints by projected-gradient Adam and validates the optimum against the real simulator; `eval_gradients.py` scores gradient quality vs ground truth (analytic Barrowman for Class-1, simulator finite-difference for Class-2)
+- **Sobolev formula distillation** (`train_distill_class1.py`) — fine-tunes the surrogate on unlimited exact synthetic Barrowman data with value + derivative matching, repairing the closed-form targets' gradient fields while real-corpus replay preserves the flight-dynamics targets; the `class1_exact` hybrid splices the analytic Barrowman for cg/cp/stability (exact value **and** gradient)
+- Sample-complexity tooling: `learning_curve.py --mode {nn,classifier}`
 - Train/val/test splitting and evaluation with metrics tables
 
 **In Progress:**
-- Large-scale dataset generation (consolidated corpus ~62k records = ~38.6k computable + ~23.5k not-computable; a 30,000-valid run is underway)
-- Neural surrogate training (pipeline rebuilt for feature parity with XGBoost; trains on the ROCm machine)
+- Large-scale dataset generation (consolidated corpus ~163k records = ~68.6k computable + ~94k not-computable)
+- Improving Class-2 (flight-dynamics) gradient quality — log-target conditioning and gradient ensembling
 - Closed-loop active learning loop implementation
 
 **Planned:**
@@ -93,18 +93,9 @@ python consolidate_dataset.py --inputs outputs/run_a.jsonl outputs/run_b.jsonl \
     --output outputs/rocket_data_full.jsonl --near-dist 0
 ```
 
-### Train XGBoost Surrogate + Feasibility Classifier
+### Train the Neural Surrogate
 
-```bash
-python src/gbt/train.py --data outputs/rocket_data_full.jsonl --no-tune \
-    --output-dir models/surrogate --plots-dir plots/surrogate
-python src/gbt/train_classifier.py --data outputs/rocket_data_full.jsonl \
-    --output-dir models/classifier --plots-dir plots/classifier
-```
-
-### Train Neural Surrogate
-
-Trains on CPU in minutes (a GPU only pays off at the millions-of-rows scale of formula distillation). `--save-dir` writes a portable, self-contained bundle (weights + config + scalers + metadata) mirroring `models/surrogate/`:
+Trains on CPU in minutes (a GPU only pays off at the millions-of-rows scale of formula distillation). `--save-dir` writes a portable, self-contained bundle (weights + config + scalers + metadata):
 
 ```bash
 python src/neural_surrogate/train_surrogate.py --data outputs/rocket_data_full.jsonl \
@@ -112,16 +103,16 @@ python src/neural_surrogate/train_surrogate.py --data outputs/rocket_data_full.j
     --save-dir models/neural --device auto
 ```
 
-### Gradient-Based Design Optimization
-
-Score the surrogate's gradient quality against ground truth (analytic Barrowman for cg/cp/stability; add `--with-sim` to finite-difference the simulator for the flight-dynamics targets):
+### Train the Feasibility Classifier
 
 ```bash
-python src/neural_surrogate/eval_gradients.py --bundle models/neural \
-    --data outputs/rocket_data_full.jsonl --n-class1 400 --with-sim --n-sim 3
+python src/gbt/train_classifier.py --data outputs/rocket_data_full.jsonl \
+    --output-dir models/classifier --plots-dir plots/classifier
 ```
 
-Repair the closed-form targets' gradients with Sobolev (value + derivative) distillation on exact synthetic data — scales to millions of rows / the $100 AMD GPU via `--synth` / `--device`:
+### Sobolev Formula Distillation
+
+Repair the closed-form targets' gradients with Sobolev (value + derivative) distillation on exact synthetic Barrowman data — scales to millions of rows / the $100 AMD GPU via `--synth` / `--device`:
 
 ```bash
 python src/neural_surrogate/train_distill_class1.py --bundle models/neural \
@@ -129,12 +120,27 @@ python src/neural_surrogate/train_distill_class1.py --bundle models/neural \
     --save-dir models/neural_distilled
 ```
 
+### Gradient-Based Design Optimization
+
+Maximize apogee (or any target) over the design inputs by following the surrogate's autograd gradient, subject to the physical constraints (stability, Mach/apogee caps, T/W, geometry), then validate the optimum against the real RocketPy simulator:
+
+```bash
+python src/neural_surrogate/optim/design_optimizer.py --diameter 54 --motor K \
+    --nose ogive --fin 4 --n-restarts 16 --steps 400 --validate
+```
+
+Score the surrogate's gradient quality against ground truth (analytic Barrowman for cg/cp/stability; add `--with-sim` to finite-difference the simulator for the flight-dynamics targets):
+
+```bash
+python src/neural_surrogate/eval_gradients.py --bundle models/neural_distilled \
+    --data outputs/rocket_data_full.jsonl --n-class1 400 --with-sim --n-sim 3
+```
+
 ### Sample-Complexity Studies
 
 ```bash
-python learning_curve.py --mode surrogate  --inputs outputs/rocket_data_full.jsonl --out-dir outputs/learning_curve
-python learning_curve.py --mode classifier --inputs outputs/rocket_data_full.jsonl --out-dir outputs/classifier_curve
 python learning_curve.py --mode nn         --inputs outputs/rocket_data_full.jsonl --device auto
+python learning_curve.py --mode classifier --inputs outputs/rocket_data_full.jsonl --out-dir outputs/classifier_curve
 ```
 
 ### Run Timing Benchmark
@@ -161,8 +167,9 @@ RocketSurrogate/
 │   ├── bench_compare.py          #   Benchmark comparison
 │   └── bench_memory.py           #   Memory benchmark
 ├── src/
-│   ├── common/                   # Shared single-source-of-truth package (pure numpy)
+│   ├── common/                   # Shared single-source-of-truth package
 │   │   ├── schema.py             # Canonical input/target fields, encodings, cardinalities
+│   │   ├── features.py           # Engineered features (incl. Barrowman) + LOG1P_TARGETS, shared
 │   │   ├── scalers.py            # StandardScaler / MinMaxScaler
 │   │   └── dataio.py             # Tolerant JSONL loader
 │   ├── rocket_sim/               # Data generation pipeline
@@ -177,27 +184,24 @@ RocketSurrogate/
 │   │   ├── utils.py              # CG estimation, Barrowman CP, stability margin
 │   │   ├── splitter.py           # Train/val/test splitting
 │   │   └── plotter.py            # Distribution plots
-│   ├── gbt/                      # XGBoost surrogate models
+│   ├── gbt/                      # within_bounds feasibility classifier (XGBoost)
 │   │   ├── data_loader.py        # JSONL loading (label-aware: regression vs classification)
-│   │   ├── preprocess.py         # Feature engineering (incl. Barrowman) + scaling
-│   │   ├── synthetic_data.py     # Synthetic corpus generation via gen_worker
-│   │   ├── model.py              # XGBoost training (categorical support)
-│   │   ├── evaluate.py           # Metrics, plots, feature importance
-│   │   ├── train.py              # Regression surrogate entry point (one model per target)
 │   │   └── train_classifier.py   # within_bounds feasibility classifier entry point
-│   └── neural_surrogate/         # Neural network surrogate + LLM distillation
-│       ├── data/dataset.py       # Label-aware loading + engineered-feature parity with gbt
+│   └── neural_surrogate/         # Neural network surrogate + differentiable design optimization
+│       ├── data/dataset.py       # Label-aware loading + shared engineered features (common/features)
 │       ├── models/surrogate.py   # MLP / ResMLP / Feature-Transformer
 │       ├── training/trainer.py   # Training loop (CUDA/ROCm auto-device)
-│       ├── optim/                # Differentiable surrogate for gradient-based design optimization
+│       ├── optim/                # Differentiable surrogate + gradient-based design optimizer
 │       │   ├── diff_features.py  #   Torch reimpl. of the 14 engineered features (incl. Barrowman)
-│       │   └── diff_surrogate.py #   End-to-end differentiable raw-params → metrics wrapper
+│       │   ├── diff_surrogate.py #   End-to-end differentiable raw-params → metrics wrapper (class1_exact hybrid)
+│       │   └── design_optimizer.py #  Projected-gradient Adam design optimizer + real-sim validation
 │       ├── train_surrogate.py    # Neural surrogate entry point (--loss, --save-dir bundle)
 │       ├── eval_gradients.py     # Gradient-quality eval vs analytic + simulator ground truth
 │       └── train_distill_class1.py  # Sobolev formula distillation for the closed-form targets
 ├── tests/
 │   ├── test_schema.py            # Schema consistency checks
 │   ├── test_diff_features.py     # Differentiable features match numpy + autograd correctness
+│   ├── test_design_optimizer.py  # Optimizer feasibility/improvement + constraint checks
 │   └── debug_params.py
 ├── models/                       # Trained models (gitignored)
 ├── plots/                        # Evaluation plots (gitignored)
@@ -221,8 +225,8 @@ JSONL (JSON Lines), one record per line. Each record has `input` (21 design para
 5. **Cheap performance gate before simulation** — A closed-form drag-aware boost+coast estimate rejects designs whose predicted Mach/apogee clearly exceed the caps, removing the dominant source of wasted simulations. Thresholds are calibrated against real outcomes for zero false-rejections (verified 0/5000 on the seed-2026 run).
 6. **Process isolation + memory self-regulation** — Each simulation runs in a separate worker with a hard-kill timeout; the pool also recycles workers on RSS growth and throttles dispatch under system-RAM pressure, so a leaking sim cannot stall or OOM a multi-day run.
 7. **Capture the negative class** — Rejected designs are saved as `within_bounds=false` rather than discarded, so a feasibility classifier can tell the downstream LLM which designs are not computable.
-8. **Single source of truth for the schema** — `src/common/schema.py` defines all input/target fields and encodings once; the simulator, XGBoost, and neural packages import it rather than redefining their own.
-9. **Feature parity across model families** — XGBoost and the neural surrogate share the same engineered features (incl. closed-form Barrowman cg/cp/stability), so accuracy comparisons isolate the model, not the inputs.
+8. **Single source of truth** — `src/common/schema.py` (fields/encodings) and `src/common/features.py` (engineered features) are defined once; the simulator, neural surrogate, and classifier import them rather than redefining their own.
+9. **Differentiable end-to-end** — the surrogate pipeline (incl. the engineered Barrowman features) is reimplemented in torch, so flight metrics are autograd-differentiable w.r.t. the raw design inputs — enabling gradient-based design optimization.
 10. **Closed-loop co-evolution** — The LLM proposer and neural surrogate evaluator improve together through iterative active learning.
 
 ## Documentation
