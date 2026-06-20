@@ -73,13 +73,11 @@ def main():
     check(surrogate.CATEGORICAL_FEATURES == schema.INPUT_CATEGORICAL,
           "surrogate.CATEGORICAL_FEATURES == schema.INPUT_CATEGORICAL")
 
-    # 6) gbt synthetic_data re-exports the schema fields.
-    sys.path.insert(0, os.path.join(ROOT, "src", "gbt"))
-    import synthetic_data  # noqa: E402
-    check(synthetic_data.INPUT_FEATURES == schema.INPUT_FIELDS,
-          "synthetic_data.INPUT_FEATURES == schema.INPUT_FIELDS")
-    check(synthetic_data.TARGET_FEATURES == schema.TARGETS,
-          "synthetic_data.TARGET_FEATURES == schema.TARGETS")
+    # 6) shared engineered-feature module imports and appends the Barrowman block.
+    sys.path.insert(0, os.path.join(ROOT, "src", "common"))
+    from features import add_engineered_features, LOG1P_TARGETS  # noqa: E402
+    check(LOG1P_TARGETS <= set(schema.TARGETS),
+          "LOG1P_TARGETS is a subset of the regression targets")
 
     print("\nAll schema consistency checks passed.")
 

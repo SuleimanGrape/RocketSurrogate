@@ -255,7 +255,7 @@ class Trainer:
 
         log1p_indices: target columns stored in log1p space by the dataset; they
         are inverted with expm1 here (after the StandardScaler inverse) so every
-        metric is in the targets' natural units — mirrors gbt/evaluate.predict_all.
+        metric is reported in the targets' natural units.
         """
         self.model.eval()
         all_preds, all_targets = [], []

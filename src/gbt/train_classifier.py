@@ -6,9 +6,10 @@ flight for it (within_bounds=True) or not (False, i.e. rejected by pre-validatio
 or by the sim). This is the feasibility gate the downstream LLM consults before
 proposing a rocket we have no data for.
 
-Same input features and engineered (incl. Barrowman) features as the regression
-surrogate, so a single feature pipeline serves both. Trains XGBoost
-binary:logistic with scale_pos_weight for the class imbalance, evaluates on a
+Same input features and engineered (incl. Barrowman) features as the neural
+surrogate (shared from common/features), so a single feature pipeline serves
+both. Trains XGBoost binary:logistic with scale_pos_weight for the class
+imbalance, evaluates on a
 held-out test split (ROC-AUC, PR-AUC, accuracy, confusion at a chosen
 threshold), and saves the model + metadata.
 
@@ -33,7 +34,7 @@ sys.path.insert(0, os.path.join(ROOT, "src", "gbt"))
 import schema                                   # noqa: E402
 from dataio import load_jsonl                   # noqa: E402
 from data_loader import extract_arrays          # noqa: E402
-from preprocess import add_engineered_features  # noqa: E402
+from features import add_engineered_features    # noqa: E402  (shared, in common/)
 import xgboost as xgb                           # noqa: E402
 
 XGB_PARAMS = {

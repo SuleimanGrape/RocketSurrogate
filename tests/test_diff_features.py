@@ -14,14 +14,13 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src", "common"))
 sys.path.insert(0, os.path.join(ROOT, "src", "rocket_sim"))
-sys.path.insert(0, os.path.join(ROOT, "src", "gbt"))
 sys.path.insert(0, os.path.join(ROOT, "src", "neural_surrogate"))
 
 import torch                                    # noqa: E402
 import pandas as pd                             # noqa: E402
 import schema                                   # noqa: E402
 from dataio import load_jsonl                   # noqa: E402
-from preprocess import add_engineered_features  # noqa: E402
+from features import add_engineered_features    # noqa: E402  (shared, in common/)
 from optim.diff_features import (               # noqa: E402
     continuous_block, ENGINEERED_NAMES, CONTINUOUS_NAMES,
 )

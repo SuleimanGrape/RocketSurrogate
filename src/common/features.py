@@ -1,22 +1,34 @@
 #!/usr/bin/env python3
-"""Feature preprocessing: scaling, feature engineering, and train/transform consistency."""
+"""Shared feature engineering — the single source of truth for the engineered
+input features, used by both the neural surrogate and the within_bounds
+classifier (and verified, in torch, by neural_surrogate/optim/diff_features.py).
+
+Lives in ``common`` so no model package owns it. Depends only on numpy/pandas and
+the pure-math Barrowman helpers in ``rocket_sim/utils.py``.
+"""
 
 import os
 import sys
 import numpy as np
-from typing import Dict, Tuple, Optional
-
-# Shared scalers (z-score for features, min-max for targets).
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
-from scalers import StandardScaler as FeatureScaler, MinMaxScaler as TargetScaler  # noqa: F401
+from typing import Tuple
 
 # Closed-form Barrowman cg/cp/stability margin (exact functions of the geometry).
-# Adding them as features lets the trees read off the otherwise hard-to-predict
+# Adding them as features lets a model read off the otherwise hard-to-predict
 # stability margin (a small (cp-cg) difference) without any target leakage.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rocket_sim"))
 from utils import compute_cp_barrowman, stability_margin_calibers  # noqa: E402
 
-# Inputs compute_cp_barrowman needs; the features are only added when all present.
+# Targets fit on log1p(y) and inverted with expm1 at predict time. Used for
+# heavy-tailed targets where typical (relative) accuracy matters more than R^2:
+# max_acceleration_mps2 (mean ~260, rare spikes to ~2000) — log1p cuts MAE ~23%
+# and MAPE 4.4%->2.7%, at the cost of a slight R^2 dip (R^2 is dominated by the
+# rare large-magnitude points the transform deliberately deweights). Consumers
+# invert these so everything downstream stays in the original units; the saved
+# model metadata records the log1p target list.
+LOG1P_TARGETS = {"max_acceleration_mps2"}
+
+# Inputs compute_cp_barrowman needs; the Barrowman features are only added when
+# all are present.
 _BARROWMAN_INPUTS = [
     "diameter_mm", "length_m", "nose_length_m", "nose_type", "fin_count",
     "fin_root_chord_m", "fin_tip_chord_m", "fin_span_m",
@@ -30,18 +42,16 @@ def add_engineered_features(
 ) -> Tuple[np.ndarray, list]:
     """
     Add physically-motivated engineered features for rocket data.
-    These help gradient boost trees capture non-linear relationships.
 
     Notes:
         - Computes diameter_m on the fly for derived features but does NOT
           add it as a separate column (avoids linear dependence on diameter_mm).
         - Categorical columns (nose_type, motor_class) are passed through
-          unchanged — XGBoost handles them natively.
+          unchanged.
     """
     import pandas as pd
 
     df = pd.DataFrame(X, columns=feature_names)
-    new_features = []
     new_names = []
 
     # Inline diameter conversion (not stored as a separate feature)
@@ -112,8 +122,7 @@ def add_engineered_features(
         df["slenderness"] = df["length_m"] ** 2 / (d_m + 1e-9)
         new_names.append("slenderness")
 
-    # Ballistic coefficient proxy: mass / (Cd * cross_section)
-    # Higher = better coasting performance
+    # Ballistic coefficient proxy: mass / (Cd * cross_section). Higher = better coast.
     if "dry_mass_kg" in df.columns and "propellant_mass_kg" in df.columns and "diameter_mm" in df.columns:
         if d_m is None:
             d_m = _diam_m()
@@ -143,74 +152,3 @@ def add_engineered_features(
 
     result_names = feature_names + new_names
     return df[result_names], result_names
-
-
-def preprocess(
-    splits: Dict[str, Tuple],
-    feature_names: list,
-    scale_features: bool = True,
-    scale_targets: bool = False,
-    engineer_features: bool = True,
-) -> Dict:
-    """
-    Full preprocessing pipeline.
-
-    Args:
-        splits: {"train": (X, Y), "val": (X, Y), "test": (X, Y)}
-                X can be pd.DataFrame (with categorical columns) or np.ndarray
-        feature_names: list of original feature name strings
-        scale_features: apply z-score normalization to features
-        scale_targets: apply min-max scaling to targets
-        engineer_features: add derived features
-
-    Returns:
-        Dictionary with processed arrays, fitted scalers, and updated feature_names.
-    """
-    current_names = list(feature_names)
-
-    # ── Feature engineering (same transform on all splits) ────────────
-    if engineer_features:
-        X_train, Y_train = splits["train"]
-        X_train, current_names = add_engineered_features(X_train, current_names)
-        X_val, _ = splits["val"]
-        X_val, _ = add_engineered_features(X_val, feature_names)
-        X_test, _ = splits["test"]
-        X_test, _ = add_engineered_features(X_test, feature_names)
-        splits = {
-            "train": (X_train, Y_train),
-            "val": (X_val, splits["val"][1]),
-            "test": (X_test, splits["test"][1]),
-        }
-
-    # ── Fit scalers on training data ─────────────────────────────────
-    if scale_features:
-        feat_scaler = FeatureScaler()
-        feat_scaler.fit(splits["train"][0])
-    else:
-        feat_scaler = None
-
-    if scale_targets:
-        targ_scaler = TargetScaler()
-        targ_scaler.fit(splits["train"][1])
-    else:
-        targ_scaler = None
-
-    # ── Transform all splits ─────────────────────────────────────────
-    result = {
-        "feature_names": current_names,
-        "feature_scaler": feat_scaler,
-        "target_scaler": targ_scaler,
-        "engineered": engineer_features,
-        "n_features": splits["train"][0].shape[1],
-        "n_targets": splits["train"][1].shape[1],
-    }
-    for split_name, (X, Y) in splits.items():
-        if feat_scaler is not None:
-            X = feat_scaler.transform(X)
-        if targ_scaler is not None:
-            Y = targ_scaler.transform(Y)
-        result[split_name] = {"X": X, "Y": Y}
-        result[f"X_{split_name}"] = X
-        result[f"Y_{split_name}"] = Y
-
-    return result

@@ -1,7 +1,4 @@
-"""PyTorch Dataset / DataLoader for rocket simulation JSONL data.
-
-Used by both the pure NN trainer and the XGBoost trainer (via make_splits).
-"""
+"""PyTorch Dataset / DataLoader for rocket simulation JSONL data."""
 
 from __future__ import annotations
 
@@ -15,7 +12,6 @@ from typing import Tuple, Optional, Dict, List
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "common"))
 sys.path.insert(0, os.path.join(_HERE, "..", "..", "rocket_sim"))
-sys.path.insert(0, os.path.join(_HERE, "..", "..", "gbt"))
 from dataio import load_jsonl  # noqa: F401  (re-exported for callers)
 import schema  # noqa: E402
 
@@ -31,20 +27,20 @@ from models.surrogate import (
 def _is_positive(rec: Dict) -> bool:
     """A within-bounds (computable) record. Negatives carry within_bounds=False
     and no numeric targets; legacy records without the field are positive.
-    Mirrors gbt/data_loader.py so both trainers filter identically."""
+    Mirrors gbt/data_loader.py so the surrogate and classifier filter identically."""
     return rec.get("output", {}).get("within_bounds") is not False
 
 
 def engineered_continuous(records: List[Dict]) -> Tuple[np.ndarray, List[str]]:
-    """Compute the SAME engineered continuous features the XGBoost trees use
-    (total mass, ratios, Barrowman cg/cp/stability margin, ...) so the two model
-    families train on identical information. Reuses gbt/preprocess as the single
-    source of truth — never re-derives the formulas here.
+    """Compute the engineered continuous features (total mass, ratios, Barrowman
+    cg/cp/stability margin, ...) from the shared single source of truth in
+    common/features — the same features the within_bounds classifier uses and
+    that optim/diff_features reimplements in torch. Never re-derives them here.
 
     Returns (array of shape (n, n_engineered) float32, engineered feature names).
     """
     import pandas as pd
-    from preprocess import add_engineered_features  # gbt — on sys.path above
+    from features import add_engineered_features  # common — on sys.path above
 
     raw = pd.DataFrame([r["input"] for r in records])[schema.INPUT_FIELDS]
     full, names = add_engineered_features(raw, list(schema.INPUT_FIELDS))
@@ -183,10 +179,10 @@ class RocketDataset(Dataset):
             eng, eng_names = engineered_continuous(records)
             cont = np.hstack([cont, eng]).astype(np.float32)
             cont_names = cont_names + eng_names
-        # Heavy-tailed targets are fit in log1p space (same gbt LOG1P_TARGETS set
-        # the trees use); evaluate() inverts them with expm1. Single source of
-        # truth, so the two model families treat the tail identically.
-        from model import LOG1P_TARGETS  # gbt (on sys.path above)
+        # Heavy-tailed targets are fit in log1p space (shared LOG1P_TARGETS set);
+        # evaluate() inverts them with expm1. Single source of truth in
+        # common/features so every consumer treats the tail identically.
+        from features import LOG1P_TARGETS  # common (on sys.path above)
         log1p_indices = [i for i, k in enumerate(target_keys) if k in LOG1P_TARGETS]
         for i in log1p_indices:
             tgt[:, i] = np.log1p(tgt[:, i])
